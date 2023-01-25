@@ -1,0 +1,17 @@
+{
+  "entryFile": "src/index.ts",
+  "noImplicitAdditionalProperties": "throw-on-extras",
+  "controllerPathGlobs": ["src/**/*Controller.ts"],
+  "spec": {
+    "outputDirectory": "public",
+    "specVersion": 3,
+    "contact": {
+      "name": "Ross Adamson",
+      "url": "https://rossadamson.com",
+      "email": "dev@rossadamson.com"
+    }
+  },
+  "routes": {
+    "routesDir": "build"
+  }
+}
