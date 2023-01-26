@@ -1,13 +1,14 @@
 import webdriver, { By, until, WebDriver, WebElement } from 'selenium-webdriver'
 import { parse, addDays } from 'date-fns'
-import { createObjectCsvWriter } from 'csv-writer'
-import db, { Db, ScreeningBasicInfo, ScreeningMoreInfo } from './db'
+import db, { ScreeningBasicInfo, ScreeningMoreInfo } from './db'
+import { sendMyselfTweet, tweetMaxLength } from './twitter'
 
 let ops: (() => void)[] = []
 
 export const state = {
   inOp: 0,
   runningMain: true,
+  screeningIndex: -1,
 }
 
 export function assertNotInOp() {
@@ -106,17 +107,41 @@ export type ScreeningBasicInfoExtended = ScreeningBasicInfo & {
 
 export async function getBasicScreeningInfo(screening: WebElement): Promise<ScreeningBasicInfoExtended> {
   const updatedAt = new Date()
+  const firstPartLocator = By.css('.sd_first_select_film')
+  await screening.getDriver().wait(until.elementLocated(firstPartLocator), waitTime(3000))
   const firstPart = await screening.findElement(By.css('.sd_first_select_film'))
+  firstPart.getDriver().executeScript('arguments[0].scrollIntoView(true);', firstPart)
+  await screening.getDriver().wait(until.elementIsVisible(firstPart), waitTime(5000))
 
-  const title = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Title}) a`)).getText()
-  const dateString = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Date})`)).getText()
+  const titleLocator = By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Title})`)
+  let title = ''
+  await firstPart.getDriver().wait(async () => {
+    const titleElements = await firstPart.findElements(titleLocator)
+    title = titleElements ? await titleElements[0].getText() : ''
+    return !!title
+  }, waitTime(3000), 'title')
+  let dateString = ''
+  await firstPart.getDriver().wait(async () => {
+    dateString = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Date})`)).getText()
+    return !!dateString
+  }, waitTime(1000), 'dateString')
   const timeRangeAndScreeningTypeTd = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.TimeRangeAndScreeningType})`))
-  const timeRangeString = await timeRangeAndScreeningTypeTd.findElement(By.css(':scope > p:nth-child(1)')).getText()
-  const location = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Location})`)).getText()
+  let timeRangeString = ''
+  await firstPart.getDriver().wait(async () => {
+    timeRangeString = await timeRangeAndScreeningTypeTd.findElement(By.css(':scope > p:nth-child(1)')).getText()
+    return !!timeRangeString
+  }, waitTime(1000), 'timeRangeString')
+  let location = ''
+  await firstPart.getDriver().wait(async () => {
+    location = await firstPart.findElement(By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Location})`)).getText()
+    return !!location
+  }, waitTime(1000), 'location')
   const isInParkCity = location.endsWith('Park City') || location.endsWith('Sundance Mountain Resort')
   const isInSaltLakeCity = location.endsWith('Salt Lake City')
 
   const screeningId = `${title} - ${dateString} - ${timeRangeString} - ${location}`
+  // TODO: remove
+  //await new Promise(resolve => setTimeout(resolve, 100000))
 
   const timeStrings = timeRangeString.split(' - ')
   const timeRangeObjects = timeStrings.map(timeString => {
@@ -343,8 +368,11 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
   const screeningsActual = screenings ?? await loadScreenings(driver)
   const basicInfos: ScreeningBasicInfoExtended[] = []
 
-  for (const screening of screeningsActual) {
+  const newlyAvailableScreenings: ScreeningBasicInfo[] = []
+  for (let i = 0; i < screeningsActual.length; ++i) {
+    const screening = screeningsActual[i]
     const basicInfo = await getBasicScreeningInfo(screening)
+    console.log(`${i + 1}.) ${basicInfo.id}`)
     basicInfos.push(basicInfo)
     const {
       id,
@@ -352,11 +380,40 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
       timeRangeAndScreeningTypeTd,
       ...rest
     } = basicInfo
+    const storedBasicInfo = db.getScreeningBasicInfo(basicInfo.id)
+    if (!storedBasicInfo || storedBasicInfo.isUnavailable) {
+      newlyAvailableScreenings.push(basicInfo)
+    }
     db.setScreeningBasicInfo(basicInfo.id, rest)
+  }
+
+  const newlyAvailableScreeningTitles = Array.from(new Set(newlyAvailableScreenings.map(info => info.title)))
+  if (newlyAvailableScreeningTitles.length) {
+    await sendMyselfTweet('Newly available screenings:', newlyAvailableScreeningTitles)
   }
 
   const program = basicInfos.map(({ id }) => id)
   db.program = program
+
+  const { screenings: newScreenings } = db
+
+  for (const screeningId of newScreenings) {
+    if (!program.includes(screeningId)) {
+      const storedBasicInfo = db.getScreeningBasicInfo(screeningId)
+      if (storedBasicInfo && !storedBasicInfo.isUnavailable) {
+        db.setScreeningBasicInfo(screeningId, {
+          ...storedBasicInfo,
+          isUnavailable: true,
+        })
+      }
+    }
+  }
+
+  program.forEach(screeningId => {
+    newScreenings.add(screeningId)
+  })
+  db.screenings = newScreenings
+
   return program
 }
 
@@ -403,13 +460,6 @@ export async function refreshScreeningInfo({
     screeningIndex = program.indexOf(screeningId)
     if (screeningIndex === -1) {
       console.log(`screening no longer available: ${screeningId}`)
-      const storedBasicInfo = db.getScreeningBasicInfo(screeningId)
-      if (storedBasicInfo) {
-        db.setScreeningBasicInfo(screeningId, {
-          ...storedBasicInfo,
-          isUnavailable: true,
-        })
-      }
       return {
         screeningIndex,
         refreshedProgram,
@@ -444,23 +494,9 @@ export async function refreshScreeningInfo({
     isInSaltLakeCity,
     startTime,
     endTime,
-    updatedAt,
   } = basicInfo
 
   console.log(`${screeningIndex}. ${id}`)
-
-  db.setScreeningBasicInfo(screeningId, {
-    title,
-    dateString,
-    timeRangeString,
-    location,
-    isInParkCity,
-    isInSaltLakeCity,
-    startTime,
-    endTime,
-    isUnavailable: false,
-    updatedAt,
-  })
 
   const moreInfo = await getScreeningInfo(basicInfo)
   const {
@@ -484,13 +520,14 @@ export async function refreshScreeningInfo({
     console.log('Time end:', endTime.toLocaleString())
   }
 
-  const newMoreInfo = {
+  let storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+  let newMoreInfo = {
+    ...storedMoreInfo,
     screeningType,
     isPremiere,
     isSecondScreening,
     updatedAt: moreInfoUpdatedAt,
   }
-
   db.setScreeningMoreInfo(screeningId, newMoreInfo)
 
   if (skipTba && basicInfo.title.startsWith('TBA ')) {
@@ -552,18 +589,24 @@ export async function refreshScreeningInfo({
     const ticketTypeElements = await titleElement.findElements(ticketTypeLocator)
     const ticketType = ticketTypeElements.length ? await ticketTypeElements[0].getText() : undefined
     console.log('ticketType', ticketType)
-    const isTicketSoldOut = (ticketType || '').endsWith('(SOLD OUT)') || undefined
+    let isTicketSoldOut: boolean | undefined = (ticketType || '').endsWith('(SOLD OUT)') || undefined
     if (isTicketSoldOut) {
       console.log('SOLD OUT')
     }
 
-    const storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-    const newestMoreInfo = {
+    storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+    if (!!storedMoreInfo?.isSoldOut !== !!isTicketSoldOut) {
+      await sendMyselfTweet(
+        `Screening ${isTicketSoldOut ? 'sold out' : 'tickets available'}: ${basicInfo.id}`,
+      )
+    }
+    newMoreInfo = {
       ...storedMoreInfo || newMoreInfo,
       ticketType,
       isSoldOut: isTicketSoldOut,
+      updatedAt: new Date(),
     }
-    db.setScreeningMoreInfo(screeningId, newestMoreInfo)
+    db.setScreeningMoreInfo(screeningId, newMoreInfo)
 
     let purchased = false
     if (purchaseTicketCount !== undefined) {
@@ -621,21 +664,31 @@ export async function refreshScreeningInfo({
         if (numberRemainingString) {
           const numberRemaining = +numberRemainingString
           console.log(`remaining tickets: ${numberRemaining}`)
-          const storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-          db.setScreeningMoreInfo(screeningId, {
-            ...storedMoreInfo || newestMoreInfo,
-            isSoldOut: numberRemaining === 0,
+          isTicketSoldOut = numberRemaining === 0
+          storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+          if (!!storedMoreInfo?.isSoldOut !== !!isTicketSoldOut) {
+            await sendMyselfTweet(
+              `Screening ${isTicketSoldOut ? 'sold out' : `tickets available (${numberRemaining})`}: ${basicInfo.id}`,
+            )
+          }
+          newMoreInfo = {
+            ...storedMoreInfo || newMoreInfo,
+            isSoldOut: isTicketSoldOut,
             ticketsRemaining: numberRemaining || undefined,
-          })
+            updatedAt: new Date(),
+          }
+          db.setScreeningMoreInfo(screeningId, newMoreInfo)
         }
       }
 
       if (purchased) {
-        const storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-        db.setScreeningMoreInfo(screeningId, {
-          ...storedMoreInfo || newestMoreInfo,
+        storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+        newMoreInfo = {
+          ...storedMoreInfo || newMoreInfo,
           ticketsPurchased: (storedMoreInfo?.ticketsPurchased ?? 0) + purchaseTicketCount,
-        })
+          updatedAt: new Date(),
+        }
+        db.setScreeningMoreInfo(screeningId, newMoreInfo)
       }
     }
 

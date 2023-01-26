@@ -17,17 +17,17 @@ import {
 } from './shared/shared'
 import Router from './routes'
 import db from './shared/db'
+import { sendMyselfTweet } from './shared/twitter'
 
 console.log('welcome!')
 
 async function run() {
   let screeningsSeen = db.scannedScreenings
-  let screeningIndex = -1
   if (db.currentScreeningId !== undefined) {
-    screeningIndex = db.program.indexOf(db.currentScreeningId)
+    state.screeningIndex = db.program.indexOf(db.currentScreeningId)
   }
-  if (screeningIndex === -1) {
-    screeningIndex = 0
+  if (state.screeningIndex === -1) {
+    state.screeningIndex = 0
   }
   let driver: WebDriver | undefined
   while (true) {
@@ -51,8 +51,8 @@ async function run() {
         endOp()
       }
       while (state.runningMain && !state.inOp) {
-        if (!db.program.length || screeningIndex >= db.program.length) {
-          screeningIndex = 0
+        if (!db.program.length || state.screeningIndex >= db.program.length) {
+          state.screeningIndex = 0
           screeningsSeen = []
           db.scannedScreenings = screeningsSeen
           db.currentScreeningId = undefined
@@ -66,7 +66,7 @@ async function run() {
           console.log('reached end of program')
           break
         }
-        const screeningId = db.program[screeningIndex]
+        const screeningId = db.program[state.screeningIndex]
         if (!screeningsSeen.includes(screeningId)) {
           let result
           try {
@@ -78,10 +78,10 @@ async function run() {
           }
           screeningsSeen.push(screeningId)
           db.scannedScreenings = screeningsSeen
-          screeningIndex = result.screeningIndex
+          state.screeningIndex = result.screeningIndex
         }
-        ++screeningIndex
-        db.currentScreeningId = db.program[screeningIndex]
+        ++state.screeningIndex
+        db.currentScreeningId = db.program[state.screeningIndex]
       }
     } catch (error) {
       console.error(error)
@@ -95,39 +95,35 @@ async function run() {
   }
 }
 
+const app = express()
+
 if (false) {
-  run()
-} else {
-  const app = express()
-
-  if (false) {
-    app.use(cors())
-  }
-
-  app.use(
-    '/api-docs',
-    swaggerUi.serve,
-    swaggerUi.setup(undefined, {
-      swaggerOptions: {
-        url: '/swagger.json',
-      },
-      explorer: true,
-    }),
-  )
-
-  app.use(morgan('tiny'))
-  app.use(express.urlencoded({ extended: true }))
-  app.use(express.json())
-  app.use(express.static('public'))
-
-  app.get('/', (req, res) => {
-    console.log('GET /')
-    res.send('Welcome!')
-  })
-
-  app.use(Router)
-
-  app.listen(port, () => console.log('Listening on port', port))
-
-  run()
+  app.use(cors())
 }
+
+app.use(
+  '/api-docs',
+  swaggerUi.serve,
+  swaggerUi.setup(undefined, {
+    swaggerOptions: {
+      url: '/swagger.json',
+    },
+    explorer: true,
+  }),
+)
+
+app.use(morgan('tiny'))
+app.use(express.urlencoded({ extended: true }))
+app.use(express.json())
+app.use(express.static('public'))
+
+app.get('/', (req, res) => {
+  console.log('GET /')
+  res.send('Welcome!')
+})
+
+app.use(Router)
+
+app.listen(port, () => console.log('Listening on port', port))
+
+run()

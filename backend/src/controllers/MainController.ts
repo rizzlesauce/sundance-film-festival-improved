@@ -297,6 +297,9 @@ export default class MainController {
   @Get(MainController.getStatePath)
   @Tags('App')
   public getAppState() {
-    return state
+    return {
+      ...state,
+      currentScreeningId: db.currentScreeningId,
+    }
   }
 }

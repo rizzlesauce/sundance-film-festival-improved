@@ -47,9 +47,6 @@ export class Db {
 
   set program(program: string[]) {
     this.db.set(Db.programKey, program)
-    const { screenings } = this
-    program.forEach(screeningId => screenings.add(screeningId))
-    this.screenings = screenings
   }
 
   private static readonly screeningsKey = 'screenings'
