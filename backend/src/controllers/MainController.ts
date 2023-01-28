@@ -35,6 +35,7 @@ import {
   FilmInfoVerbosity,
   refreshShortsInfoFromId,
   getFilmInfoStoredComplete,
+  pruneScreeningInfo,
 } from '../shared/shared'
 import db from '../shared/db'
 import { Readable } from 'stream'
@@ -244,14 +245,7 @@ export default class MainController {
       filterFilmIds,
       filterCategories,
       filterTags,
-    }).map(screening => ({
-      ...screening,
-      filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({
-        film,
-        verbosity,
-        noTitle: true,
-      })),
-    }))
+    }).map(screening => pruneScreeningInfo(screening, verbosity))
   }
 
   static readonly screeningsCsvPath = '/screenings-csv'
@@ -302,13 +296,7 @@ export default class MainController {
       filterFilmIds,
       filterCategories,
       filterTags,
-    }).map(screening => ({
-      ...screening,
-      filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({
-        film,
-        verbosity,
-      })),
-    }))
+    }).map(screening => pruneScreeningInfo(screening, verbosity))
 
     const stream = new Readable()
     const csvWriter = createObjectCsvStringifier({

@@ -1144,7 +1144,7 @@ export async function refreshScreeningInfo({
   return {
     screeningIndex,
     refreshedProgram,
-    info,
+    info: pruneScreeningInfo(info),
   }
 }
 
@@ -1273,19 +1273,31 @@ export function getScreeningInfoStored(screeningId: string, withFilmInfo = false
   const filmInfos = (withFilmInfo && basicInfo) ? getFilmsByTitle(basicInfo.title) : undefined
   return {
     id: screeningId,
-    basicInfo: basicInfo && {
-      ...basicInfo,
+    basicInfo,
+    moreInfo,
+    filmInfos,
+  }
+}
+
+export function pruneScreeningInfo(
+  screening: ReturnType<typeof getScreeningInfoStored>,
+  verbosity: FilmInfoVerbosity = 'basic',
+) {
+  return {
+    ...screening,
+    basicInfo: screening.basicInfo && {
+      ...screening.basicInfo,
       dateString: undefined,
       timeRangeString: undefined,
       isInParkCity: undefined,
       isInSaltLakeCity: undefined,
     },
-    moreInfo: moreInfo && {
-      ...moreInfo,
+    moreInfo: screening.moreInfo && {
+      ...screening.moreInfo,
       isPremiere: undefined,
       isSecondScreening: undefined,
     },
-    filmInfos,
+    filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({ film, verbosity, noTitle: true }))
   }
 }
 
