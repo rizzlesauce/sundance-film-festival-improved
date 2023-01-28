@@ -1,7 +1,14 @@
 import webdriver, { By, until, WebDriver, WebElement } from 'selenium-webdriver'
 import { parse, addDays } from 'date-fns'
-import db, { ScreeningBasicInfo, ScreeningMoreInfo } from './db'
-import { sendMyselfTweet, tweetMaxLength } from './twitter'
+import db, {
+  FilmCategory,
+  Credit,
+  FilmInfo,
+  ScreeningBasicInfo,
+  ScreeningMoreInfo,
+  FilmTitleAndId,
+} from './db'
+import { sendMyselfTweet } from './twitter'
 
 let ops: (() => void)[] = []
 
@@ -9,6 +16,11 @@ export const state = {
   inOp: 0,
   runningMain: true,
   screeningIndex: -1,
+}
+
+export async function scrollElementIntoView(element: WebElement, message?: string) {
+  await element.getDriver().executeScript('arguments[0].scrollIntoView(true);', element)
+  await element.getDriver().wait(until.elementIsVisible(element), waitTime(5000), message)
 }
 
 export function assertNotInOp() {
@@ -53,8 +65,56 @@ export const port = +(process.env.PORT || 3000)
 export const baseUrl = 'https://festival.sundance.org'
 export const homeUrl = `${baseUrl}/`
 export const signinUrl = `${baseUrl}/sign-in`
+export const programUrl = `${baseUrl}/program`
+export const filmsUrl = `${programUrl}/films`
+export const filmUrl = (filmId: string) => `${programUrl}/film/${filmId}`
+export const shortsInfoUrl = (shortId: string) => `${programUrl}/short-info/${shortId}`
 export const ticketsUrl = `${baseUrl}/tickets`
 export const cartUrl = `${ticketsUrl}/cart`
+
+export const filmOrShortsInfoUrlRegex = new RegExp(`${programUrl}/(film|short-info)/([a-zA-Z0-9]+)`)
+export const filmUrlRegex = new RegExp(filmUrl('([a-zA-Z0-9]+)'))
+export const shortsInfoUrlRegex = new RegExp(shortsInfoUrl('([a-zA-Z0-9]+)'))
+
+export function getEventIdFromUrl(url: string) {
+  const result = filmOrShortsInfoUrlRegex.exec(url)
+  if (!result) {
+    throw new Error(`invalid film or shorts url: ${url}`)
+  }
+  const eventTypeString = result[1]
+  let eventType: 'film' | 'shorts'
+  switch (eventTypeString) {
+    case 'film':
+      eventType = 'film'
+      break
+    case 'short-info':
+      eventType = 'shorts'
+      break
+    default:
+      throw new Error(`invalid event type: ${eventTypeString}`)
+  }
+  const eventId = result[2]
+  return {
+    eventType,
+    eventId,
+  }
+}
+
+export function getFilmIdFromUrl(url: string) {
+  const filmId = filmUrlRegex.exec(url)?.[1]
+  if (!filmId) {
+    throw new Error('failed to parse film id')
+  }
+  return filmId
+}
+
+export function getShortsIdFromUrl(url: string) {
+  const shortsId = shortsInfoUrlRegex.exec(url)?.[1]
+  if (!shortsId) {
+    throw new Error('failed to parse shorts id')
+  }
+  return shortsId
+}
 
 export function waitTime(ms: number) {
   return ms
@@ -65,6 +125,51 @@ export function removeParenthesis(str: string) {
   if (str.startsWith('(') && str.endsWith(')')) {
     result = str.substring(1, str.length - 1)
   }
+  return result
+}
+
+export function filterBySearchStrings<R>({
+  needles,
+  haystack,
+  getValues,
+  or,
+}: {
+  needles: string[]
+  haystack: R[]
+  getValues: (record: R) => string[]
+  or?: (record: R, needle: string) => boolean
+}) {
+  const exactNeedleSet = new Set<string>()
+  const fuzzyNeedleSet = new Set<string>()
+  const fuzzyNeedleMarker = '~'
+  needles.forEach(needle => {
+    if (needle.startsWith(fuzzyNeedleMarker)) {
+      const fuzzyNeedle = needle.substring(fuzzyNeedleMarker.length).trim().toLowerCase()
+      if (fuzzyNeedle) {
+        fuzzyNeedleSet.add(fuzzyNeedle)
+      }
+    } else {
+      const exactNeedle = needle.trim()
+      if (exactNeedle) {
+        exactNeedleSet.add(exactNeedle)
+      }
+    }
+  })
+  if (!exactNeedleSet.size && !fuzzyNeedleSet.size) {
+    return haystack
+  }
+  const fuzzyNeedles = Array.from(fuzzyNeedleSet)
+  const result = haystack.filter(record => {
+    return getValues(record).some(value => {
+      if (exactNeedleSet.has(value)) {
+        return true
+      }
+      const lowerValue = value.toLowerCase()
+      return fuzzyNeedles.some(fuzzyNeedle => lowerValue.includes(fuzzyNeedle))
+    }) || (
+      or && needles.some(needle => or(record, needle))
+    )
+  })
   return result
 }
 
@@ -110,8 +215,7 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
   const firstPartLocator = By.css('.sd_first_select_film')
   await screening.getDriver().wait(until.elementLocated(firstPartLocator), waitTime(3000))
   const firstPart = await screening.findElement(By.css('.sd_first_select_film'))
-  firstPart.getDriver().executeScript('arguments[0].scrollIntoView(true);', firstPart)
-  await screening.getDriver().wait(until.elementIsVisible(firstPart), waitTime(5000))
+  await scrollElementIntoView(firstPart)
 
   const titleLocator = By.css(`:scope > td:nth-child(${ScreeningInfoChildNumber.Title})`)
   let title = ''
@@ -140,8 +244,6 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
   const isInSaltLakeCity = location.endsWith('Salt Lake City')
 
   const screeningId = `${title} - ${dateString} - ${timeRangeString} - ${location}`
-  // TODO: remove
-  //await new Promise(resolve => setTimeout(resolve, 100000))
 
   const timeStrings = timeRangeString.split(' - ')
   const timeRangeObjects = timeStrings.map(timeString => {
@@ -196,53 +298,384 @@ export const checkoutButtonLocator = By.xpath('//div[@class="sd_checkout_btn"]/b
 export const removeItemButtonLocator = By.css('button.sd_mycart_item_remove_btn')
 export const confirmRemoveButtonLocator = By.xpath('//button[contains(@class, "sd_form_submit_button") and text()="Yes"]')
 
-/*
-async function findScreenings({
-  driver,
-  title,
-  startDateTime,
-  location,
-}: {
-  driver: WebDriver
-  title?: string
-  startDateTime?: Date
-  location?: string
-}) {
-  const screenings = await driver.findElements(screeningsLocator)
-  if (title !== undefined) {
-    //screenings.
+export async function scrapeFilmCategoryEventCard(eventCard: WebElement): Promise<FilmCategory> {
+  await scrollElementIntoView(eventCard)
+  const title = await eventCard.findElement(By.css('.sd_event_card_desc > h2')).getText()
+  const description = await eventCard.findElement(By.css('.sd_event_card_desc_content')).getText()
+  return {
+    title,
+    description,
+    updatedAt: new Date(),
+  }
+}
+
+export async function refreshCategories(driver: WebDriver) {
+  await driver.get(programUrl)
+
+  const eventCardLocator = By.css('.sd_event_card')
+  await driver.wait(until.elementLocated(eventCardLocator), waitTime(7000))
+  const eventCards = await driver.findElements(eventCardLocator)
+
+  const results: FilmCategory[] = []
+
+  for (let i = 0; i < eventCards.length; ++i) {
+    const eventCard = eventCards[i]
+    const category = await scrapeFilmCategoryEventCard(eventCard)
+    db.setFilmCategory(category.title, category)
+    console.log(`${i}) ${category.title}`)
+    results.push(category)
   }
 
-  let childNum = 1
-  const title = await screening.findElement(By.css(`.sd_first_select_film > td:nth-child(${childNum}) a`)).getText()
-  childNum += 1
-  const dateString = await screening.findElement(By.css(`.sd_first_select_film > td:nth-child(${childNum})`)).getText()
-  childNum += 1
-  const timeRangeString = await screening.findElement(By.css(`.sd_first_select_film > td:nth-child(${childNum}) p:nth-child(1)`)).getText()
-  const screeningTypeElements = await screening.findElements(By.css(`.sd_first_select_film > td:nth-child(${childNum}) p:nth-child(2)`))
-  const screeningType = screeningTypeElements.length ? removeParenthesis(await screeningTypeElements[0].getText()) : ''
-  childNum += 1
-  const location = await screening.findElement(By.css(`.sd_first_select_film > td:nth-child(${childNum})`)).getText()
+  db.categories = new Set(results.map(category => category.title))
 
-  const isPremiere = screeningType === 'Premiere'
-  const isSecondScreening = screeningType === 'Second Screening'
-  const isInParkCity = location.endsWith('Park City')
-  const isInSaltLakeCity = location.endsWith('Salt Lake City')
+  const { allCategories } = db
+  results.forEach(category => {
+    allCategories.add(category.title)
+  })
+  db.allCategories = allCategories
 
-  const date = parse(dateString, 'MMMM d, yyyy', referenceDate)
+  return results
+}
 
-    const timeStrings = timeRangeString.split(' - ')
-    const timeRangeObjects = timeStrings.map(timeString => {
-      const dateTimeString = `${dateString} ${timeString}`
-      const dateTime = parse(dateTimeString, 'MMMM d, yyyy h:mm aa', referenceDate)
-      return {
-        timeString,
-        dateTimeString,
-        dateTime,
+export async function waitForLoadingDone({
+  driver,
+  waitFind = 5000,
+  waitStale = 7000,
+}: {
+  driver: WebDriver,
+  waitFind?: number
+  waitStale?: number
+}) {
+  const loadingLocator = By.css('.sd_loader')
+  let loading: WebElement | undefined
+  try {
+    await driver.wait(until.elementLocated(loadingLocator), waitTime(waitFind))
+    loading = driver.findElement(loadingLocator)
+  } catch (e) {
+    console.warn('loading not found')
+  }
+  if (loading) {
+    await driver.wait(until.stalenessOf(loading), waitTime(waitStale))
+  }
+}
+
+export async function refreshFilms(driver: WebDriver) {
+  await driver.get(filmsUrl)
+
+  const films = new Map<string, FilmTitleAndId>()
+  let lastPage = 0
+  let lastPageFirstEventId = ''
+  const seenEventIds = new Set<string>()
+
+  await waitForLoadingDone({ driver })
+
+  while (true) {
+    let newCardsNotYetLoadedCount = -1
+    let lastEventCardsLength = 0
+    let lastEventCardFoundTime = Number.MAX_VALUE
+    let eventCards: WebElement[] = []
+    const thresholdMs = 1500
+    await driver.wait(async () => {
+      eventCards = await driver.findElements(By.css('.sd_event_card'))
+      if (eventCards.length) {
+        const now = new Date().getTime()
+        const msPassed = now - lastEventCardFoundTime
+        if (eventCards.length > lastEventCardsLength) {
+          lastEventCardsLength = eventCards.length
+          lastEventCardFoundTime = now
+        } else if (msPassed > thresholdMs) {
+          return true
+        }
       }
+    }, waitTime(7000), 'event cards loaded')
+
+    console.log('lastPage', lastPage)
+
+    let currentPage = -1
+    await driver.wait(async () => {
+      currentPage = +(await driver.findElement(By.css('.pagination .active a')).getText())
+      return currentPage === lastPage + 1
+    }, waitTime(5000), 'page number incremented')
+    lastPage = currentPage
+
+    const paginationButtons = await driver.findElements(By.css('.pagination a'))
+    const totalPages = +(await paginationButtons[paginationButtons.length - 2]?.getText())
+    const nextButtonContainer = await driver.findElement(By.css('.pagination .next'))
+    const nextIsDisabled = (await nextButtonContainer.getAttribute('class')).split(/\s+/).includes('disabled')
+    const isLastPage = nextIsDisabled && currentPage === totalPages
+    console.log('totalPages', totalPages)
+    console.log('currentPage', currentPage)
+    console.log('nextIsDisabled', nextIsDisabled)
+    console.log('isLastPage', isLastPage)
+
+    for (let cardIndex = 0; cardIndex < eventCards.length; ++cardIndex) {
+      const card = eventCards[cardIndex]
+      await scrollElementIntoView(card)
+      const title = await card.findElement(By.css('.sd_event_card_desc h2')).getText()
+      const url = await card.getAttribute('href')
+      let eventId
+      let eventType: 'film' | 'shorts'
+      try {
+        eventId = getFilmIdFromUrl(url)
+        eventType = 'film'
+      } catch (e) {
+        eventId = getShortsIdFromUrl(url)
+        eventType = 'shorts'
+      }
+      if (cardIndex === 0) {
+        if (eventId === lastPageFirstEventId) {
+          if (newCardsNotYetLoadedCount < 0) {
+            newCardsNotYetLoadedCount = 5
+          } else {
+            newCardsNotYetLoadedCount -= 1
+          }
+          break
+        } else {
+          lastPageFirstEventId = eventId
+        }
+      }
+      console.log(`${cardIndex + 1}) ${title} ${eventType} ${eventId}`)
+      if (seenEventIds.has(eventId)) {
+        console.warn(`skipping duplicate event id (already seen ${eventId} this round)`)
+        continue
+      }
+      const tagLine = await card.findElement(By.css('.sd_event_card_desc_content')).getAttribute('innerHTML')
+      const titleAndId = {
+        id: eventId,
+        title,
+        isShorts: eventType === 'shorts' || undefined,
+        updatedAt: new Date(),
+      }
+      films.set(eventId, titleAndId)
+      db.setFilmBasicInfo(eventId, {
+        ...titleAndId,
+        url,
+        tagLine,
+      })
+      const { allFilms } = db
+      allFilms.set(eventId, titleAndId)
+      db.allFilms = allFilms
+    }
+
+    if (newCardsNotYetLoadedCount >= 0) {
+      console.warn(`new cards not yet loaded; tries remaining: ${newCardsNotYetLoadedCount}`)
+      if (newCardsNotYetLoadedCount === 0) {
+        throw new Error('failed to get next page event cards')
+      }
+      continue
+    }
+
+    if (isLastPage) {
+      break
+    }
+
+    //await scrollElementIntoView(nextButton)
+    await nextButtonContainer.click()
+  }
+
+  db.films = films
+  return Array.from(films.values())
+}
+
+export async function refreshSpecifiedEventInfoFromCurrentPage(
+  driver: WebDriver,
+  isShorts?: boolean,
+  parentEventId?: string,
+): Promise<FilmInfo> {
+  console.log('refreshSpecifiedEventInfoFromCurrentPage()')
+  await driver.wait(
+    until.urlMatches(isShorts ? shortsInfoUrlRegex : filmUrlRegex),
+    waitTime(7000)
+  )
+
+  const url = await driver.getCurrentUrl()
+  const eventId = isShorts ? getShortsIdFromUrl(url) : getFilmIdFromUrl(url)
+
+  let category = ''
+  await driver.wait(async () => {
+    const elements = await driver.findElements(By.css('.sd_film_desc_label'))
+    if (elements.length) {
+      category = (await elements[0].getAttribute('textContent')).trim()
+    }
+    return !!category
+  }, waitTime(5000), 'category')
+  let title = ''
+  await driver.wait(async () => {
+    const elements = await driver.findElements(By.css('.sd_film_description h2.sd_textuppercase'))
+    if (elements.length) {
+      title = (await elements[0].getAttribute('textContent')).trim()
+    }
+    return !!title
+  }, waitTime(5000), 'category')
+
+  const description = await driver.findElement(By.css('.sd_film_description_content')).getAttribute('innerHTML')
+
+  const tagElements = await driver.findElements(By.css('.sd_film_description_content_cat > span'))
+  const tags = new Set<string>
+  for (const tagElement of tagElements) {
+    const tag = (await tagElement.getAttribute('textContent')).trim()
+    if (tag) {
+      tags.add(tag)
+    }
+  }
+
+  const panelistName = isShorts ? '' : await driver.findElement(By.css('.sd_panelist_name > h3')).getText()
+  const panelistDescription = isShorts ? '' : await driver.findElement(By.css('.sd_panelist_desc .sd_rtf_content')).getAttribute('innerHTML')
+  const creditElements = isShorts ? [] : await driver.findElements(By.css('.sd_film_artists_credits_sec li'))
+
+  const credits: Credit[] = []
+  for (const credit of creditElements) {
+    const name = (await credit.findElement(By.css('.sd_film_artists_cr_pos')).getAttribute('textContent')).trim()
+    if (!name) {
+      continue
+    }
+    const valueElements = await credit.findElements(By.css('.sd_film_artists_cr_name > p'))
+    const values: string[] = []
+    for (const valueElement of valueElements) {
+      const value = (await valueElement.getAttribute('textContent')).trim()
+      if (value) {
+        values.push(value)
+      }
+    }
+    credits.push({
+      name,
+      values,
     })
-    const [startTime, endTime] = timeRangeObjects
-*/
+  }
+
+  const filmInfos = new Array<FilmInfo>()
+  if (isShorts) {
+    let shortsIndex = 0
+    let totalShorts = -1
+    let lastTotalShorts = -1
+    const idsSeen = new Set<string>()
+    const shortLinkLocator = By.css('.sd_film_description .sd_film_desc_timings > div.short_links > a')
+    for (; totalShorts < 0 || shortsIndex < totalShorts; ++shortsIndex) {
+      await driver.wait(until.elementLocated(shortLinkLocator), waitTime(7000))
+      const shortLinks = await driver.findElements(shortLinkLocator)
+      totalShorts = shortLinks.length
+      if (lastTotalShorts < 0) {
+        lastTotalShorts = totalShorts
+      }
+      if (totalShorts < lastTotalShorts) {
+        shortsIndex -= 1
+        continue
+      }
+      console.log('shorts: ', shortLinks.length)
+      if (shortsIndex < totalShorts) {
+        const shortLink = shortLinks[shortsIndex]
+        //await scrollElementIntoView(shortLink, 'short link')
+        await driver.wait(until.elementIsVisible(shortLink), waitTime(3000), 'short link')
+
+        const shortTitle = await shortLink.getText()
+        console.log(`${shortsIndex + 1}) (short) ${shortTitle}`)
+
+        await shortLink.click()
+        const info = await refreshSpecifiedEventInfoFromCurrentPage(driver, false, eventId)
+        if (!idsSeen.has(info.id)) {
+          filmInfos.push(info)
+          idsSeen.add(info.id)
+        }
+        if (shortsIndex < totalShorts - 1) {
+          await driver.get(url)
+          await new Promise(resolve => setTimeout(resolve, 1000))
+        }
+      }
+    }
+  }
+
+  const filmTitleAndId = {
+    id: eventId,
+    title,
+    isShorts: isShorts || undefined,
+    ...parentEventId && {
+      parentEventId,
+    },
+    updatedAt: new Date(),
+  }
+
+  const info = {
+    ...filmTitleAndId,
+    url,
+    panelist: {
+      name: panelistName,
+      description: panelistDescription,
+    },
+    description,
+    tags: Array.from(tags),
+    category,
+    credits,
+    films: filmInfos.length ? filmInfos.map(film => ({
+      id: film.id,
+      title: film.title,
+    })) : undefined,
+  }
+
+  db.setFilmInfo(eventId, info)
+
+  const { films } = db
+  films.set(filmTitleAndId.id, filmTitleAndId)
+  db.films = films
+
+  const { allFilms } = db
+  allFilms.set(filmTitleAndId.id, filmTitleAndId)
+  db.allFilms = allFilms
+
+  return info
+}
+
+export async function refreshFilmInfoFromId(driver: WebDriver, filmId: string): Promise<FilmInfo> {
+  await driver.get(filmUrl(filmId))
+
+  return await refreshSpecifiedEventInfoFromCurrentPage(driver)
+}
+
+export async function refreshShortsInfoFromId(driver: WebDriver, shortsId: string): Promise<FilmInfo> {
+  await driver.get(shortsInfoUrl(shortsId))
+
+  return await refreshSpecifiedEventInfoFromCurrentPage(driver, true)
+}
+
+export async function refreshEventInfoFromCurrentPage(driver: WebDriver) {
+  await driver.wait(until.urlMatches(filmOrShortsInfoUrlRegex), waitTime(7000))
+
+  const url = await driver.getCurrentUrl()
+  const {
+    eventType,
+    eventId,
+  } = getEventIdFromUrl(url)
+
+  if (eventType === 'film') {
+    return await refreshFilmInfoFromId(driver, eventId)
+  } else if (eventType === 'shorts') {
+    return await refreshShortsInfoFromId(driver, eventId)
+  } else {
+    throw new Error(`unsupported event type: ${eventType}`)
+  }
+}
+
+export async function refreshFilmInfoFromTitleSearch(driver: WebDriver, titleSearch: string): Promise<FilmInfo> {
+  await driver.get(filmsUrl)
+
+  await waitForLoadingDone({ driver })
+
+  const searchButtonLocator = By.css('.sd_menu_search button')
+  await driver.wait(until.elementLocated(searchButtonLocator), waitTime(3000))
+  const searchButton = await driver.findElement(searchButtonLocator)
+  await driver.wait(until.elementIsVisible(searchButton), waitTime(5000))
+  await searchButton.click()
+
+  const searchInputLocator = By.css('.sd_popup_search_input input')
+  await driver.wait(until.elementLocated(searchInputLocator), waitTime(3000))
+  await driver.findElement(searchInputLocator).sendKeys(titleSearch)
+
+  const filmEntryLocator = By.css('.sd_popup_table table tbody tr')
+  await driver.wait(until.elementLocated(filmEntryLocator), waitTime(7000))
+  const filmEntry = await driver.findElement(filmEntryLocator)
+  await filmEntry.findElement(By.css(':scope > td')).click()
+
+  return await refreshEventInfoFromCurrentPage(driver)
+}
 
 export async function loadScreenings(driver: WebDriver) {
   /*
@@ -372,7 +805,7 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
   for (let i = 0; i < screeningsActual.length; ++i) {
     const screening = screeningsActual[i]
     const basicInfo = await getBasicScreeningInfo(screening)
-    console.log(`${i + 1}.) ${basicInfo.id}`)
+    console.log(`${i + 1}) ${basicInfo.id}`)
     basicInfos.push(basicInfo)
     const {
       id,
@@ -394,11 +827,12 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
 
   const program = basicInfos.map(({ id }) => id)
   db.program = program
+  const programSet = new Set(program)
 
   const { screenings: newScreenings } = db
 
   for (const screeningId of newScreenings) {
-    if (!program.includes(screeningId)) {
+    if (!programSet.has(screeningId)) {
       const storedBasicInfo = db.getScreeningBasicInfo(screeningId)
       if (storedBasicInfo && !storedBasicInfo.isUnavailable) {
         db.setScreeningBasicInfo(screeningId, {
@@ -409,7 +843,7 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
     }
   }
 
-  program.forEach(screeningId => {
+  programSet.forEach(screeningId => {
     newScreenings.add(screeningId)
   })
   db.screenings = newScreenings
@@ -546,8 +980,6 @@ export async function refreshScreeningInfo({
         await driver.wait(until.elementLocated(checkoutButtonLocator), waitTime(7000))
 
         if (purchaseTicketCount !== undefined) {
-          // TODO: remove
-          console.log('purchaseTicketCount', typeof purchaseTicketCount, purchaseTicketCount)
           const getCurrentTicketCount = async () => {
             return +(await driver.findElement(By.css('div.sd_home_pass_count > input')).getAttribute('value'))
           }
@@ -562,7 +994,7 @@ export async function refreshScreeningInfo({
               await driver.wait(async () => {
                 currentTicketCount = await getCurrentTicketCount()
                 return currentTicketCount === (ticketCount + 1)
-              })
+              }, waitTime(3000))
             } else if (currentTicketCount > purchaseTicketCount) {
               throw new Error('Ticket count higher than requested!')
             }
@@ -611,15 +1043,12 @@ export async function refreshScreeningInfo({
     let purchased = false
     if (purchaseTicketCount !== undefined) {
       const term1Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm1"]')
-      await driver.wait(until.elementLocated(term1Locator))
+      await driver.wait(until.elementLocated(term1Locator), waitTime(3000))
       await driver.findElement(term1Locator).click()
 
       const term2Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm2"]')
-      await driver.wait(until.elementLocated(term2Locator))
+      await driver.wait(until.elementLocated(term2Locator), waitTime(3000))
       await driver.findElement(term2Locator).click()
-
-      // TODO: remove
-      //await new Promise(resolve => setTimeout(resolve, 10 * 60000))
 
       const buyMiniPrefix = 'Buy ($'
       const buyPrefix = `${buyMiniPrefix}`
@@ -679,6 +1108,9 @@ export async function refreshScreeningInfo({
           }
           db.setScreeningMoreInfo(screeningId, newMoreInfo)
         }
+      } else {
+        console.log('purchased successful')
+        purchased = true
       }
 
       if (purchased) {
@@ -716,13 +1148,119 @@ export async function refreshScreeningInfo({
   }
 }
 
-export function getScreeningInfoStored(screeningId: string) {
+function getFilmInfoStored<
+  T extends (
+    Omit<FilmTitleAndId, 'updatedAt'>
+    & Partial<Pick<FilmTitleAndId, 'updatedAt'>>
+  )
+>(
+  titleAndId: T
+) {
+  const basicInfo = db.getFilmBasicInfo(titleAndId.id)
+  const moreInfo = db.getFilmInfo(titleAndId.id)
+  const result = {
+    ...titleAndId,
+    url: titleAndId.isShorts ? shortsInfoUrl(titleAndId.id) : filmUrl(titleAndId.id),
+    basicInfo: basicInfo && {
+      ...basicInfo,
+      id: undefined,
+      title: undefined,
+      url: undefined,
+      isShorts: undefined,
+    },
+    moreInfo: moreInfo && {
+      ...moreInfo,
+      id: undefined,
+      title: undefined,
+      url: undefined,
+      films: moreInfo.films?.length ? moreInfo.films?.map(film => ({
+        ...film,
+        url: filmUrl(film.id),
+      })) : undefined,
+    },
+  }
+  return result
+}
+
+export function getFilmInfoStoredComplete<
+  T extends (
+    Omit<FilmTitleAndId, 'updatedAt'>
+    & Partial<Pick<FilmTitleAndId, 'updatedAt'>>
+  )
+>(
+  titleAndId: T
+) {
+  const result = getFilmInfoStored(titleAndId)
+  return {
+    ...result,
+    moreInfo: result.moreInfo && {
+      ...result.moreInfo,
+      films: result.moreInfo.films?.map(film => ({
+        ...film,
+        ...getFilmInfoStored(film),
+      }))
+    }
+  }
+  return result
+}
+
+export type FilmInfoVerbosity = 'essential' | 'basic' | 'short' | 'tags' | 'verbose'
+
+export function pruneFilmInfo({
+  film,
+  verbosity = 'basic',
+  noTitle,
+} : {
+  film: ReturnType<typeof getFilmInfoStoredComplete>
+  verbosity?: FilmInfoVerbosity
+  noTitle?: boolean
+}) {
+  return {
+    ...film,
+    title: noTitle ? undefined : film.title,
+    basicInfo: (
+      verbosity === 'essential'
+        ? undefined
+        : film.basicInfo
+    ),
+    moreInfo: (
+      (verbosity === 'essential' || !film.moreInfo)
+        ? undefined
+        : (
+          verbosity === 'verbose'
+            ? film.moreInfo
+            : {
+              category: film.moreInfo.category,
+              updatedAt: film.moreInfo.updatedAt,
+              ...verbosity !== 'basic' && {
+                panelist: {
+                  name: film.moreInfo.panelist.name,
+                },
+                ...verbosity !== 'short' && {
+                  tags: film.moreInfo.tags,
+                },
+              },
+            }
+        )
+    ),
+  }
+}
+
+export function getFilmsByTitle(title: string) {
+  return Array.from(db.allFilms.values())
+    .filter(titleAndId => titleAndId.title === title)
+    .map(titleAndId => getFilmInfoStoredComplete(titleAndId))
+}
+
+export function getScreeningInfoStored(screeningId: string, withFilmInfo = false) {
   const basicInfo = db.getScreeningBasicInfo(screeningId)
   const moreInfo = db.getScreeningMoreInfo(screeningId)
+  const filmInfos = (withFilmInfo && basicInfo) ? getFilmsByTitle(basicInfo.title) : undefined
   return {
     id: screeningId,
-    ...basicInfo,
-    ...moreInfo,
+    basicInfo,
+    moreInfo,
+    filmInfos,
   }
 }
 
@@ -732,54 +1270,132 @@ export type GetScreeningsFilterPremiereType = 'premiere' | 'second'
 
 export function getScreenings({
   sortBy,
+  filterVenues,
   filterCities,
   filterTitles,
   soldOut,
   available,
-  screeningType,
+  screeningTypes,
+  filterCategories,
+  filterTags,
+  filterFilmIds,
+  withFilmInfo,
 } : {
   sortBy?: GetScreeningsSortBy
-  filterCities?: GetScreeningsFilterCity[]
+  filterVenues?: string[]
+  filterCities?: (GetScreeningsFilterCity | string)[]
   filterTitles?: string[]
   soldOut?: boolean
   available?: boolean
-  screeningType?: GetScreeningsFilterPremiereType
+  screeningTypes?: (GetScreeningsFilterPremiereType | string)[]
+  filterCategories?: string[]
+  filterTags?: string[]
+  filterFilmIds?: string[]
+  withFilmInfo?: boolean
 } = {}) {
   const screenings = available === true ? db.program : Array.from(db.screenings)
-  let results = screenings.map(screeningId => getScreeningInfoStored(screeningId))
-  if (filterTitles) {
-    results = results.filter(screening => filterTitles.includes(screening.title ?? ''))
-  }
-  if (soldOut !== undefined) {
-    results = results.filter(screening => !!screening.isSoldOut === soldOut)
-  }
-  if (filterCities) {
-    results = results.filter(screening => {
-      return filterCities.some(filterCity => {
-        switch (filterCity) {
-          case 'parkCity':
-            return !!screening.isInParkCity
-          case 'slc':
-            return !!screening.isInSaltLakeCity
-          default:
-            return screening.location?.endsWith(`, ${filterCity}`)
-        }
-      })
+  const actualWithFilmInfo = (
+    withFilmInfo
+    || !!filterCategories?.length
+    || !!filterTags?.length
+    || !!filterFilmIds?.length
+  )
+  let results = screenings.map(screeningId => getScreeningInfoStored(screeningId, actualWithFilmInfo))
+  if (filterTitles?.length) {
+    results = filterBySearchStrings({
+      needles: filterTitles,
+      haystack: results,
+      getValues: screening => [screening.basicInfo?.title ?? ''],
     })
   }
-  if (screeningType !== undefined) {
-    results = results.filter(screening => (
-      (screeningType === 'premiere' && screening.isPremiere)
-      || (screeningType === 'second' && screening.isSecondScreening)
-    ))
+  if (soldOut !== undefined) {
+    results = results.filter(screening => !!screening.moreInfo?.isSoldOut === soldOut)
+  }
+  const cityPrefix = ', '
+  const getCityPrefixIndex = (str: string) => str.lastIndexOf(cityPrefix)
+  if (filterVenues?.length) {
+    results = filterBySearchStrings({
+      needles: filterVenues,
+      haystack: results,
+      getValues: screening => {
+        const cityIndex = getCityPrefixIndex(screening.basicInfo?.location ?? '')
+        if (cityIndex !== -1) {
+          const venue = screening.basicInfo?.location.substring(0, cityIndex) ?? ''
+          return [venue]
+        }
+        return []
+      },
+    })
+  }
+  if (filterCities?.length) {
+    results = filterBySearchStrings({
+      needles: filterCities,
+      haystack: results,
+      getValues: screening => {
+        const cityIndex = getCityPrefixIndex(screening.basicInfo?.location ?? '')
+        if (cityIndex !== -1) {
+          const city = screening.basicInfo?.location.substring(cityIndex + cityPrefix.length) ?? ''
+          return [city]
+        }
+        return []
+      },
+      or: (screening, needle) => {
+        switch (needle) {
+          case 'parkCity':
+            return !!screening.basicInfo?.isInParkCity
+          case 'slc':
+            return !!screening.basicInfo?.isInSaltLakeCity
+          default:
+            return false
+        }
+      },
+    })
+  }
+  if (screeningTypes?.length) {
+    results = filterBySearchStrings({
+      needles: screeningTypes,
+      haystack: results,
+      getValues: screening => [screening.moreInfo?.screeningType ?? ''].filter(v => !!v),
+      or: (screening, screeningType) => (
+        (screeningType === 'premiere' && !!screening.moreInfo?.isPremiere)
+        || (screeningType === 'second' && !!screening.moreInfo?.isSecondScreening)
+      ),
+    })
+  }
+  if (filterFilmIds?.length) {
+    results = filterBySearchStrings({
+      needles: filterFilmIds,
+      haystack: results,
+      getValues: screening => (screening.filmInfos ?? []).map(
+        film => film.id,
+      ),
+    })
+  }
+  if (filterCategories?.length) {
+    results = filterBySearchStrings({
+      needles: filterCategories,
+      haystack: results,
+      getValues: screening => (screening.filmInfos ?? []).flatMap(
+        film => [film.moreInfo?.category ?? ''].filter(v => !!v),
+      ),
+    })
+  }
+  if (filterTags?.length) {
+    results = filterBySearchStrings({
+      needles: filterTags,
+      haystack: results,
+      getValues: screening => (screening.filmInfos ?? []).flatMap(
+        film => film.moreInfo?.tags ?? [],
+      ),
+    })
   }
   if (available !== undefined) {
-    results = results.filter(screening => !!screening.isUnavailable !== available)
+    results = results.filter(screening => !!screening.basicInfo?.isUnavailable !== available)
   }
   if (sortBy) {
     if (sortBy === 'startTime') {
       results.sort((a, b) => {
-        return (a.startTime?.getTime() ?? 0) - (b.startTime?.getTime() ?? 0)
+        return (a.basicInfo?.startTime?.getTime() ?? 0) - (b.basicInfo?.startTime?.getTime() ?? 0)
       })
     }
   }

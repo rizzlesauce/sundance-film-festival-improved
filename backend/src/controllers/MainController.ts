@@ -26,12 +26,153 @@ import {
   GetScreeningsFilterCity,
   GetScreeningsFilterPremiereType,
   csvHeader,
+  refreshCategories,
+  refreshFilmInfoFromTitleSearch,
+  refreshFilms,
+  refreshFilmInfoFromId,
+  filterBySearchStrings,
+  pruneFilmInfo,
+  FilmInfoVerbosity,
+  refreshShortsInfoFromId,
+  getFilmInfoStoredComplete,
 } from '../shared/shared'
 import db from '../shared/db'
 import { Readable } from 'stream'
 
 @Route('/')
 export default class MainController {
+  static readonly refreshCategoriesPath = '/refresh-categories'
+  @Post(MainController.refreshCategoriesPath)
+  @Tags('Categories')
+  public async refreshCategories() {
+    const driver = await createWebDriver()
+    try {
+      return await refreshCategories(driver)
+    } finally {
+      await driver.close()
+    }
+  }
+
+  static readonly categoriesPath = '/categories'
+  static readonly getCategoriesPath = MainController.categoriesPath
+  @Get(MainController.getCategoriesPath)
+  @Tags('Categories')
+  public async getCategories(
+    @Query('all') all?: boolean,
+    @Query('titles[]') titles?: string[],
+  ) {
+    let result = Array.from(all ? db.allCategories : db.categories).map(title => ({
+      title,
+      ...db.getFilmCategory(title),
+    }))
+    if (titles) {
+      result = filterBySearchStrings({
+        needles: titles,
+        haystack: result,
+        getValues: category => [category.title],
+      })
+    }
+    return result
+  }
+
+  static readonly refreshFilmsPath = '/refresh-films'
+  @Post(MainController.refreshFilmsPath)
+  @Tags('Films')
+  public async refreshFilms() {
+    const driver = await createWebDriver()
+    try {
+      const result = await refreshFilms(driver)
+      // TODO: only refresh this other stuff if specified with query param option
+      for (const film of result) {
+        if (film.isShorts) {
+          await refreshShortsInfoFromId(driver, film.id)
+        } else {
+          await refreshFilmInfoFromId(driver, film.id)
+        }
+      }
+      return result
+    } finally {
+      await driver.close()
+    }
+  }
+
+  static readonly filmsPath = '/films'
+  static readonly getFilmsPath = MainController.filmsPath
+  @Get(MainController.getFilmsPath)
+  @Tags('films')
+  public async getFilms(
+    @Query('all') all?: boolean,
+    @Query('titles[]') titles?: string[],
+    @Query('ids[]') ids?: string[],
+    @Query('categories[]') categories?: string[],
+    @Query('tags[]') tags?: string[],
+    @Query('shorts') shorts?: boolean,
+    @Query('verbosity') verbosity?: FilmInfoVerbosity,
+  ) {
+    let result = Array.from((all ? db.allFilms : db.films).values())
+      .map(film => getFilmInfoStoredComplete(film))
+    if (shorts !== undefined) {
+      result = result.filter(film => !!film.isShorts === shorts)
+    }
+    if (ids) {
+      result = filterBySearchStrings({
+        needles: ids,
+        haystack: result,
+        getValues: film => [film.id],
+      })
+    }
+    if (titles) {
+      result = filterBySearchStrings({
+        needles: titles,
+        haystack: result,
+        getValues: film => [film.title],
+      })
+    }
+    if (categories) {
+      result = filterBySearchStrings({
+        needles: categories,
+        haystack: result,
+        getValues: film => [...film.moreInfo?.category ?? []],
+      })
+    }
+    if (tags) {
+      result = filterBySearchStrings({
+        needles: tags,
+        haystack: result,
+        getValues: film => film.moreInfo?.tags ?? [],
+      })
+    }
+    return result.map(film => pruneFilmInfo({
+      film,
+      verbosity,
+    }))
+  }
+
+  static readonly refreshFilmInfoPath = '/refresh-film-info'
+  @Post(MainController.refreshFilmInfoPath)
+  @Tags('Films')
+  public async refreshFilmInfo(
+    @Query('filmId') filmId?: string,
+    @Query('shortsId') shortsId?: string,
+    @Query('titleSearch') titleSearch?: string,
+  ) {
+    const driver = await createWebDriver()
+    try {
+      if (filmId) {
+        return await refreshFilmInfoFromId(driver, filmId)
+      }
+      if (shortsId) {
+        return await refreshShortsInfoFromId(driver, shortsId)
+      }
+      if (titleSearch) {
+        return await refreshFilmInfoFromTitleSearch(driver, titleSearch)
+      }
+      throw new Error('missing `filmId` or `titleSearch` parameter')
+    } finally {
+      await driver.close()
+    }
+  }
+
   static readonly programPath = '/program'
   static readonly getProgramPath = MainController.programPath
   @Get(MainController.getProgramPath)
@@ -61,34 +202,54 @@ export default class MainController {
   /**
    * Retrieve screenings
    * @param sortBy
-   * @param filterCities Filter by `parkCity` or `slc`
+   * @param filterVenues
+   * @param filterCities
+   * @param filterOtherCities
    * @param filterTitles Filter by titles
    * @param soldOut Filter by sold out status
    * @param available Filter by screening availability
-   * @param screeningType Filter by 1st or 2nd showing
+   * @param screeningTypes
+   * @param otherScreeningTypes
+   * @param filterFilmIds
+   * @param filterCategories
+   * @param filterTags
+   * @param verbosity
    */
   @Get(MainController.getScreeningsPath)
   @Tags('Program')
   public getScreenings(
     @Query('sortBy') sortBy?: GetScreeningsSortBy,
+    @Query('venues[]') filterVenues?: string[],
     @Query('cities[]') filterCities?: GetScreeningsFilterCity[],
+    @Query('otherCities[]') filterOtherCities?: string[],
     @Query('titles[]') filterTitles?: string[],
     @Query('soldOut') soldOut?: boolean,
     @Query('available') available?: boolean,
-    @Query('screeningType') screeningType?: GetScreeningsFilterPremiereType
+    @Query('screeningTypes[]') screeningTypes?: GetScreeningsFilterPremiereType[],
+    @Query('otherScreeningTypes[]') otherScreeningTypes?: string[],
+    @Query('filmIds[]') filterFilmIds?: string[],
+    @Query('categories[]') filterCategories?: string[],
+    @Query('tags[]') filterTags?: string[],
+    @Query('verbosity') verbosity?: FilmInfoVerbosity,
   ) {
     return getScreenings({
       sortBy,
-      filterCities,
+      filterVenues,
+      filterCities: [...filterCities || [], ...filterOtherCities || []],
       filterTitles,
       soldOut,
       available,
-      screeningType,
+      screeningTypes: [...screeningTypes || [], ...otherScreeningTypes || []],
+      withFilmInfo: true,
+      filterFilmIds,
+      filterCategories,
+      filterTags,
     }).map(screening => ({
       ...screening,
-      startTime: screening.startTime?.toLocaleString(),
-      endTime: screening.endTime?.toLocaleString(),
-      updatedAt: screening.updatedAt?.toLocaleString(),
+      filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({
+        film,
+        verbosity,
+      })),
     }))
   }
 
@@ -97,31 +258,57 @@ export default class MainController {
   /**
    * Retrieve screenings as a CSV document
    * @param sortBy
-   * @param filterCities Filter by `parkCity` or `slc`
+   * @param filterVenues
+   * @param filterCities
+   * @param filterOtherCities
    * @param filterTitles Filter by titles
    * @param soldOut Filter by sold out status
    * @param available Filter by screening availability
-   * @param screeningType Filter by 1st or 2nd showing
+   * @param screeningTypes
+   * @param otherScreeningTypes
+   * @param filterFilmIds
+   * @param filterCategories
+   * @param filterTags
+   * @param verbosity
    */
   @Get(MainController.getScreeningsCsvPath)
   @Tags('Program')
   @Produces('text/csv')
   public getScreeningsCsv(
     @Query('sortBy') sortBy?: GetScreeningsSortBy,
+    @Query('venues[]') filterVenues?: string[],
     @Query('cities[]') filterCities?: GetScreeningsFilterCity[],
+    @Query('otherCities[]') filterOtherCities?: string[],
     @Query('titles[]') filterTitles?: string[],
     @Query('soldOut') soldOut?: boolean,
     @Query('available') available?: boolean,
-    @Query('screeningType') screeningType?: GetScreeningsFilterPremiereType
+    @Query('screeningTypes[]') screeningTypes?: GetScreeningsFilterPremiereType[],
+    @Query('otherScreeningTypes[]') otherScreeningTypes?: string[],
+    @Query('filmIds[]') filterFilmIds?: string[],
+    @Query('categories[]') filterCategories?: string[],
+    @Query('tags[]') filterTags?: string[],
+    @Query('verbosity') verbosity?: FilmInfoVerbosity,
   ) {
     const screenings = getScreenings({
       sortBy,
-      filterCities,
+      filterVenues,
+      filterCities: [...filterCities || [], ...filterOtherCities || []],
       filterTitles,
       soldOut,
       available,
-      screeningType,
-    })
+      screeningTypes: [...screeningTypes || [], ...otherScreeningTypes || []],
+      withFilmInfo: true,
+      filterFilmIds,
+      filterCategories,
+      filterTags,
+    }).map(screening => ({
+      ...screening,
+      filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({
+        film,
+        verbosity,
+      })),
+    }))
+
     const stream = new Readable()
     const csvWriter = createObjectCsvStringifier({
       header: csvHeader.map(name => ({ id: name, title: name })),
@@ -139,39 +326,27 @@ export default class MainController {
     screenings.forEach((
       {
         id,
-        title,
-        startTime,
-        endTime,
-        screeningType,
-        isPremiere,
-        isSecondScreening,
-        location,
-        isInParkCity,
-        isInSaltLakeCity,
-        isSoldOut,
-        ticketsPurchased,
-        ticketsRemaining,
-        isUnavailable,
-        updatedAt,
+        basicInfo,
+        moreInfo,
       },
       index,
     ) => {
       stream.push(csvWriter.stringifyRecords([{
         id,
-        title,
-        startTime: startTime?.toISOString(),
-        endTime: endTime?.toISOString(),
-        screeningType,
-        isPremiere,
-        isSecondScreening,
-        location,
-        isInParkCity,
-        isInSaltLakeCity,
-        isSoldOut,
-        ticketsPurchased,
-        ticketsRemaining,
-        isUnavailable,
-        updatedAt: updatedAt?.toISOString(),
+        title: basicInfo?.title,
+        startTime: basicInfo?.startTime.toISOString(),
+        endTime: basicInfo?.endTime.toISOString(),
+        screeningType: moreInfo?.screeningType,
+        isPremiere: moreInfo?.isPremiere,
+        isSecondScreening: moreInfo?.isSecondScreening,
+        location: basicInfo?.location,
+        isInParkCity: basicInfo?.isInParkCity,
+        isInSaltLakeCity: basicInfo?.isInSaltLakeCity,
+        isSoldOut: moreInfo?.isSoldOut,
+        ticketsPurchased: moreInfo?.ticketsPurchased,
+        ticketsRemaining: moreInfo?.ticketsRemaining,
+        isUnavailable: basicInfo?.isUnavailable,
+        updatedAt: moreInfo?.updatedAt.toISOString() ?? basicInfo?.updatedAt.toISOString(),
         index,
       }]))
     })
@@ -188,13 +363,8 @@ export default class MainController {
   public getScreening(
     @Path('screeningId') screeningId: string
   ) {
-    const screening = getScreeningInfoStored(screeningId)
-    return {
-      ...screening,
-      startTime: screening.startTime?.toLocaleString(),
-      endTime: screening.endTime?.toLocaleString(),
-      updatedAt: screening.updatedAt?.toLocaleString(),
-    }
+    const screening = getScreeningInfoStored(screeningId, true)
+    return screening
   }
 
   static readonly refreshScreeningInfoPath = '/refresh-screening/{screeningId}'
@@ -210,15 +380,7 @@ export default class MainController {
       await signIn(driver)
       await clearCart(driver)
       const data = await refreshScreeningInfo({ driver, screeningId })
-      return {
-        ...data,
-        info: data.info && {
-          ...data.info,
-          startTime: data.info.startTime?.toLocaleString(),
-          endTime: data.info.endTime?.toLocaleString(),
-          updatedAt: data.info.updatedAt?.toLocaleString(),
-        }
-      }
+      return data
     } finally {
       endOp()
       await driver.close()
@@ -244,18 +406,11 @@ export default class MainController {
         screeningId,
         purchaseTicketCount: quantity,
       })
-      if ((data.info?.ticketsPurchased ?? 0) !== (originalPurchased + quantity)) {
+      const screening = data.info
+      if ((screening?.moreInfo?.ticketsPurchased ?? 0) !== (originalPurchased + quantity)) {
         throw new Error('Unable to purchase tickets')
       }
-      return {
-        ...data,
-        info: data.info && {
-          ...data.info,
-          startTime: data.info.startTime?.toLocaleString(),
-          endTime: data.info.endTime?.toLocaleString(),
-          updatedAt: data.info.updatedAt?.toLocaleString(),
-        }
-      }
+      return data
     } finally {
       endOp()
       await driver.close()

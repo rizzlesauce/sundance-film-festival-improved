@@ -3,6 +3,7 @@ import express from 'express'
 import cors from 'cors'
 import swaggerUi from 'swagger-ui-express'
 import morgan from 'morgan'
+import { DateTime } from 'luxon'
 import {
   createWebDriver,
   signIn,
@@ -53,7 +54,7 @@ async function run() {
       while (state.runningMain && !state.inOp) {
         if (!db.program.length || state.screeningIndex >= db.program.length) {
           state.screeningIndex = 0
-          screeningsSeen = []
+          screeningsSeen = new Set()
           db.scannedScreenings = screeningsSeen
           db.currentScreeningId = undefined
           assertNotInOp()
@@ -67,7 +68,7 @@ async function run() {
           break
         }
         const screeningId = db.program[state.screeningIndex]
-        if (!screeningsSeen.includes(screeningId)) {
+        if (!screeningsSeen.has(screeningId)) {
           let result
           try {
             assertNotInOp()
@@ -76,7 +77,7 @@ async function run() {
           } finally {
             endOp()
           }
-          screeningsSeen.push(screeningId)
+          screeningsSeen.add(screeningId)
           db.scannedScreenings = screeningsSeen
           state.screeningIndex = result.screeningIndex
         }
@@ -101,6 +102,13 @@ if (false) {
   app.use(cors())
 }
 
+function customReplacer(this: any, key: string, value: any): any {
+  if (this[key] instanceof Date) {
+     return DateTime.fromJSDate(this[key]).setZone('local').toFormat('ccc, f ZZZZ')
+  }
+  return value
+}
+
 app.use(
   '/api-docs',
   swaggerUi.serve,
@@ -116,6 +124,8 @@ app.use(morgan('tiny'))
 app.use(express.urlencoded({ extended: true }))
 app.use(express.json())
 app.use(express.static('public'))
+
+app.set('json replacer', customReplacer)
 
 app.get('/', (req, res) => {
   console.log('GET /')
