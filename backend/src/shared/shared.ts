@@ -1167,12 +1167,16 @@ function getFilmInfoStored<
       title: undefined,
       url: undefined,
       isShorts: undefined,
+      tagLine: ((basicInfo.tagLine === String.raw`<p></p>\n`) || undefined) && basicInfo.tagLine,
     },
     moreInfo: moreInfo && {
       ...moreInfo,
       title: undefined,
       id: undefined,
       url: undefined,
+      description: ((moreInfo.description === String.raw`<p></p>\n`) || undefined) && moreInfo.description,
+      panelist: (moreInfo.panelist.name || undefined) && moreInfo.panelist,
+      credits: (moreInfo.credits.length || undefined) && moreInfo.credits,
       films: moreInfo.films?.length ? moreInfo.films?.map(film => ({
         ...film,
         url: filmUrl(film.id),
@@ -1195,16 +1199,22 @@ export function getFilmInfoStoredComplete<
     ...result,
     moreInfo: result.moreInfo && {
       ...result.moreInfo,
-      films: result.moreInfo.films?.map(film => ({
-        ...film,
-        ...getFilmInfoStored(film),
-      }))
+      films: result.moreInfo.films?.map(film => {
+        const info = getFilmInfoStored(film)
+        return {
+          ...info,
+          moreInfo: info.moreInfo && {
+            ...info.moreInfo,
+            parentEventId: undefined,
+          },
+        }
+      }),
     }
   }
   return result
 }
 
-export type FilmInfoVerbosity = 'essential' | 'basic' | 'short' | 'tags' | 'verbose'
+export type FilmInfoVerbosity = 'essential' | 'basic' | 'short' | 'tags' | 'credits' | 'verbose'
 
 export function pruneFilmInfo({
   film,
@@ -1235,11 +1245,14 @@ export function pruneFilmInfo({
               category: film.moreInfo.category,
               updatedAt: film.moreInfo.updatedAt,
               ...verbosity !== 'basic' && {
-                panelist: {
+                panelist: film.moreInfo.panelist && {
                   name: film.moreInfo.panelist.name,
                 },
                 ...verbosity !== 'short' && {
                   tags: film.moreInfo.tags,
+                  ...verbosity !== 'tags' && {
+                    credits: film.moreInfo.credits,
+                  },
                 },
               },
             }
@@ -1260,8 +1273,18 @@ export function getScreeningInfoStored(screeningId: string, withFilmInfo = false
   const filmInfos = (withFilmInfo && basicInfo) ? getFilmsByTitle(basicInfo.title) : undefined
   return {
     id: screeningId,
-    basicInfo,
-    moreInfo,
+    basicInfo: basicInfo && {
+      ...basicInfo,
+      dateString: undefined,
+      timeRangeString: undefined,
+      isInParkCity: undefined,
+      isInSaltLakeCity: undefined,
+    },
+    moreInfo: moreInfo && {
+      ...moreInfo,
+      isPremiere: undefined,
+      isSecondScreening: undefined,
+    },
     filmInfos,
   }
 }

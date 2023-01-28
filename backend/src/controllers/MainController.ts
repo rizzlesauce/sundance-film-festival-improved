@@ -249,6 +249,7 @@ export default class MainController {
       filmInfos: screening.filmInfos?.map(film => pruneFilmInfo({
         film,
         verbosity,
+        noTitle: true,
       })),
     }))
   }
