@@ -260,9 +260,9 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
   }
 
   return {
+    title,
     id: screeningId,
     firstPart,
-    title,
     dateString,
     timeRangeAndScreeningTypeTd,
     timeRangeString,
@@ -441,8 +441,8 @@ export async function refreshFilms(driver: WebDriver) {
       }
       const tagLine = await card.findElement(By.css('.sd_event_card_desc_content')).getAttribute('innerHTML')
       const titleAndId = {
-        id: eventId,
         title,
+        id: eventId,
         isShorts: eventType === 'shorts' || undefined,
         updatedAt: new Date(),
       }
@@ -585,8 +585,8 @@ export async function refreshSpecifiedEventInfoFromCurrentPage(
   }
 
   const filmTitleAndId = {
-    id: eventId,
     title,
+    id: eventId,
     isShorts: isShorts || undefined,
     ...parentEventId && {
       parentEventId,
@@ -606,8 +606,8 @@ export async function refreshSpecifiedEventInfoFromCurrentPage(
     category,
     credits,
     films: filmInfos.length ? filmInfos.map(film => ({
-      id: film.id,
       title: film.title,
+      id: film.id,
     })) : undefined,
   }
 
@@ -919,8 +919,8 @@ export async function refreshScreeningInfo({
   }
 
   const {
-    id,
     title,
+    id,
     dateString,
     timeRangeString,
     location,
@@ -1170,8 +1170,8 @@ function getFilmInfoStored<
     },
     moreInfo: moreInfo && {
       ...moreInfo,
-      id: undefined,
       title: undefined,
+      id: undefined,
       url: undefined,
       films: moreInfo.films?.length ? moreInfo.films?.map(film => ({
         ...film,
@@ -1217,7 +1217,9 @@ export function pruneFilmInfo({
 }) {
   return {
     ...film,
-    title: noTitle ? undefined : film.title,
+    ...noTitle && {
+      title: undefined,
+    },
     basicInfo: (
       verbosity === 'essential'
         ? undefined
