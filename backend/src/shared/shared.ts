@@ -820,7 +820,7 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
     db.setScreeningBasicInfo(basicInfo.id, rest)
   }
 
-  const newlyAvailableScreeningTitles = Array.from(new Set(newlyAvailableScreenings.map(info => info.title)))
+  const newlyAvailableScreeningTitles = Array.from(new Set(newlyAvailableScreenings.map(info => `* ${info.title}`)))
   if (newlyAvailableScreeningTitles.length) {
     await sendMyselfTweet('Newly available screenings:', newlyAvailableScreeningTitles)
   }
