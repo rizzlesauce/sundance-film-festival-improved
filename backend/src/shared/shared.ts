@@ -294,7 +294,7 @@ export async function getScreeningInfo({
 }
 
 export const screeningsLocator = By.css('.sd_tr_select_film')
-export const checkoutButtonLocator = By.xpath('//div[@class="sd_checkout_btn"]/button[contains(text(), "Checkout")]')
+export const checkoutButtonLocator = By.css('button.sd_cart_summery_checkout')
 export const removeItemButtonLocator = By.css('button.sd_mycart_item_remove_btn')
 export const confirmRemoveButtonLocator = By.xpath('//button[contains(@class, "sd_form_submit_button") and text()="Yes"]')
 
