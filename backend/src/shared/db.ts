@@ -1,4 +1,5 @@
 import JsonDb from 'simple-json-db'
+import { SelectFilmButtonInfo } from './shared'
 
 export type DateStored = string
 
@@ -84,6 +85,7 @@ export type ScreeningMoreInfo = {
   isSecondScreening: boolean
   ticketType?: string
   isSoldOut?: boolean
+  isEvent?: boolean
   ticketsPurchased?: number
   ticketsRemaining?: number
   updatedAt: Date
@@ -257,7 +259,33 @@ export class Db {
     screeningId: string,
     basicInfo: ScreeningBasicInfo
   ) {
-    this.db.set(Db.basicInfoKey(screeningId), basicInfo)
+    const {
+      title,
+      dateString,
+      timeRangeString,
+      location,
+      isInParkCity,
+      isInSaltLakeCity,
+      isUnavailable,
+      startTime,
+      endTime,
+      updatedAt,
+    } = basicInfo
+    this.db.set(
+      Db.basicInfoKey(screeningId),
+      {
+        title,
+        dateString,
+        timeRangeString,
+        location,
+        isInParkCity,
+        isInSaltLakeCity,
+        isUnavailable,
+        startTime,
+        endTime,
+        updatedAt,
+      },
+    )
   }
 
   getScreeningBasicInfo(screeningId: string): ScreeningBasicInfo | undefined {
@@ -276,9 +304,33 @@ export class Db {
 
   setScreeningMoreInfo(
     screeningId: string,
-    moreInfo: ScreeningMoreInfo
+    moreInfo: ScreeningMoreInfo,
   ) {
-    this.db.set(Db.moreInfoKey(screeningId), moreInfo)
+    const {
+      screeningType,
+      isPremiere,
+      isSecondScreening,
+      ticketType,
+      isSoldOut,
+      isEvent,
+      ticketsPurchased,
+      ticketsRemaining,
+      updatedAt,
+    } = moreInfo
+    this.db.set(
+      Db.moreInfoKey(screeningId),
+      {
+        screeningType,
+        isPremiere,
+        isSecondScreening,
+        ticketType,
+        isSoldOut,
+        isEvent,
+        ticketsPurchased,
+        ticketsRemaining,
+        updatedAt,
+      },
+    )
   }
 
   getScreeningMoreInfo(screeningId: string): ScreeningMoreInfo | undefined {

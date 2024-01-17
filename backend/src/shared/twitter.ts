@@ -5,7 +5,7 @@ const twitterApiKey = process.env['TWITTER_API_KEY']
 const twitterApiSecretKey = process.env['TWITTER_API_SECRET_KEY']
 const twitterAccessToken = process.env['TWITTER_ACCESS_TOKEN']
 const twitterAccessTokenSecret = process.env['TWITTER_ACCESS_TOKEN_SECRET']
-const twitterUsername = process.env['TWITTER_USERNAME']
+export const twitterUsername = process.env['TWITTER_USERNAME']
 
 let client: TwitterApi | undefined
 

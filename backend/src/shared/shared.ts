@@ -1,5 +1,14 @@
 import webdriver, { By, until, WebDriver, WebElement } from 'selenium-webdriver'
 import { parse, addDays } from 'date-fns'
+import utcToZonedTime from "date-fns-tz/utcToZonedTime";
+import zonedTimeToUtc from 'date-fns-tz/zonedTimeToUtc'
+
+function parseWithTimeZone(dateStr: string, formatStr: string, referenceDate: Date, timeZone: string) {
+  const zonedDate = utcToZonedTime(referenceDate, timeZone);
+  const parsedDate = parse(dateStr, formatStr, zonedDate);
+  return zonedTimeToUtc(parsedDate, timeZone);
+}
+
 import db, {
   FilmCategory,
   Credit,
@@ -8,7 +17,7 @@ import db, {
   ScreeningMoreInfo,
   FilmTitleAndId,
 } from './db'
-import { sendMyselfTweet } from './twitter'
+import { sendNotification } from './notifications';
 
 let ops: (() => void)[] = []
 
@@ -204,8 +213,76 @@ export const ScreeningInfoChildNumber = {
   Location: childNum++,
 }
 
+export type SelectFilmButtonInfo = {
+  button: WebElement
+  isSoldOut: boolean
+  isEvent?: boolean
+}
+
+export async function getSelectFilmButton(screening: WebElement, wait = 700): Promise<SelectFilmButtonInfo | undefined> {
+  const selectEventButtonLocator = By.xpath('.//button[contains(., "Select Event")]')
+  const selectFilmButtonLocator = By.xpath('.//button[contains(., "Select Film")]')
+  const soldOutButtonLocator = By.xpath('.//button[contains(text(), "Sold Out")]')
+  let selectFilmButtonInfo: SelectFilmButtonInfo | undefined
+  await screening.getDriver().wait(async () => {
+    const selectFilmButtons = await screening.findElements(selectFilmButtonLocator)
+    if (selectFilmButtons.length) {
+      selectFilmButtonInfo = {
+        button: selectFilmButtons[0],
+        isSoldOut: false,
+        isEvent: false,
+      }
+      return true
+    }
+    const soldOutButtons = await screening.findElements(soldOutButtonLocator)
+    if (soldOutButtons.length) {
+      selectFilmButtonInfo = {
+        button: soldOutButtons[0],
+        isSoldOut: true,
+      }
+      return true
+    }
+    const selectEventButtons = await screening.findElements(selectEventButtonLocator)
+    if (selectEventButtons.length) {
+      selectFilmButtonInfo = {
+        button: selectEventButtons[0],
+        isSoldOut: false,
+        isEvent: true,
+      }
+      return true
+    }
+  }, waitTime(wait))
+
+  if (!selectFilmButtonInfo) {
+    throw new Error('Missing selectFilmButton')
+  }
+
+  return selectFilmButtonInfo
+}
+
+export async function checkAndNotifySoldOutStatusChanged({
+  screeningId,
+  isSoldOut,
+}: {
+  screeningId: string
+  isSoldOut?: boolean
+}) {
+  const storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+  const didChange = !!storedMoreInfo?.isSoldOut !== !!isSoldOut
+  if (didChange) {
+    await sendNotification(
+      `Screening ${isSoldOut ? 'sold out' : isSoldOut === undefined ? 'ticket status unknown' : 'tickets available'}: ${screeningId}`,
+    )
+  }
+  return {
+    storedMoreInfo,
+    didChange,
+  }
+}
+
 export type ScreeningBasicInfoExtended = ScreeningBasicInfo & {
   id: string
+  screening: WebElement
   firstPart: WebElement
   timeRangeAndScreeningTypeTd: WebElement
 }
@@ -245,10 +322,13 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
 
   const screeningId = `${title} - ${dateString} - ${timeRangeString} - ${location}`
 
-  const timeStrings = timeRangeString.split(' - ')
+  const lastSpaceIndex = timeRangeString.lastIndexOf(' ')
+  const timeRangeWithoutZoneString = timeRangeString.substring(0, lastSpaceIndex)
+  const timeZoneString = timeRangeString.substring(lastSpaceIndex + 1)
+  const timeStrings = timeRangeWithoutZoneString.split(' - ')
   const timeRangeObjects = timeStrings.map(timeString => {
     const dateTimeString = `${dateString} ${timeString}`
-    let dateTime = parse(dateTimeString, 'MMMM d, yyyy h:mm aa', referenceDate)
+    let dateTime = parseWithTimeZone(dateTimeString, 'MMMM d, yyyy h:mm aa', referenceDate, timeZoneString)
     return {
       timeString,
       dateTime,
@@ -262,6 +342,7 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
   return {
     title,
     id: screeningId,
+    screening,
     firstPart,
     dateString,
     timeRangeAndScreeningTypeTd,
@@ -276,19 +357,24 @@ export async function getBasicScreeningInfo(screening: WebElement): Promise<Scre
 }
 
 export async function getScreeningInfo({
+  screening,
   timeRangeAndScreeningTypeTd,
-}: Pick<ScreeningBasicInfoExtended, 'timeRangeAndScreeningTypeTd'>) : Promise<ScreeningMoreInfo> {
+}: Pick<ScreeningBasicInfoExtended, 'screening' | 'timeRangeAndScreeningTypeTd'>) : Promise<ScreeningMoreInfo & {selectFilmButtonInfo?: SelectFilmButtonInfo}> {
   const updatedAt = new Date()
   const screeningTypeElements = await timeRangeAndScreeningTypeTd.findElements(By.css(':scope > p:nth-child(2)'))
   const screeningType = screeningTypeElements.length ? removeParenthesis(await screeningTypeElements[0].getText()) : ''
 
   const isPremiere = screeningType === 'Premiere'
-  const isSecondScreening = screeningType === 'Second Screening'
+  // this just means it's not a premiere; it could be a third, fourth, etc. screening
+  const isSecondScreening = screeningType === 'Screening'
+
+  const selectFilmButtonInfo = await getSelectFilmButton(screening)
 
   return {
     screeningType,
     isPremiere,
     isSecondScreening,
+    selectFilmButtonInfo,
     updatedAt,
   }
 }
@@ -686,7 +772,7 @@ export async function loadScreenings(driver: WebDriver) {
 
   await driver.get(ticketsUrl)
 
-  const selectAScreeningButtonLocator = By.xpath('//button[contains(text(), "Select a Screening")]')
+  const selectAScreeningButtonLocator = By.xpath('//button[contains(text(), "Select Screening")]')
   await driver.wait(until.elementLocated(selectAScreeningButtonLocator), waitTime(10000))
   await driver.findElement(selectAScreeningButtonLocator).click()
 
@@ -721,7 +807,7 @@ export let filterScreeningType: 'premiere' | 'second' | string | undefined
 export let filterCity: 'parkCity' | 'slc' | string | undefined
 export let filterLocation: string | undefined
 export let listAll = true
-export let selectFilm = true
+export let selectFilmToGetInfo = false
 export let listSorted = true
 export let skipTba = true
 
@@ -822,7 +908,7 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
 
   const newlyAvailableScreeningTitles = Array.from(new Set(newlyAvailableScreenings.map(info => `* ${info.title}`)))
   if (newlyAvailableScreeningTitles.length) {
-    await sendMyselfTweet('Newly available screenings:', newlyAvailableScreeningTitles)
+    await sendNotification('Newly available screenings:', newlyAvailableScreeningTitles)
   }
 
   const program = basicInfos.map(({ id }) => id)
@@ -848,7 +934,10 @@ export async function refreshProgram(driver: WebDriver, screenings?: WebElement[
   })
   db.screenings = newScreenings
 
-  return program
+  return {
+    program,
+    screenings: screeningsActual,
+  }
 }
 
 export type BoolString = 'true' | 'false'
@@ -857,10 +946,12 @@ export async function refreshScreeningInfo({
   driver,
   screeningId,
   purchaseTicketCount,
+  screenings,
 }: {
   driver: WebDriver
   screeningId: string
   purchaseTicketCount?: number
+  screenings?: WebElement[]
 }) {
   let { program } = db
   let refreshedProgram = false
@@ -872,7 +963,9 @@ export async function refreshScreeningInfo({
   let screeningIndex = program.indexOf(screeningId)
   let info: ReturnType<typeof getScreeningInfoStored> | undefined
 
-  let screenings = await loadScreenings(driver)
+  if (!screenings) {
+    screenings = await loadScreenings(driver)
+  }
   let basicInfo: ScreeningBasicInfoExtended | undefined
   console.log('screeningIndex', screeningIndex)
   if (screeningIndex >= screenings.length || screeningIndex < 0) {
@@ -889,7 +982,7 @@ export async function refreshScreeningInfo({
   }
 
   if (screeningIndex === -1) {
-    program = await refreshProgram(driver, screenings)
+    program = (await refreshProgram(driver, screenings)).program
     refreshedProgram = true
     screeningIndex = program.indexOf(screeningId)
     if (screeningIndex === -1) {
@@ -898,6 +991,7 @@ export async function refreshScreeningInfo({
         screeningIndex,
         refreshedProgram,
         info,
+        screenings,
       }
     }
   }
@@ -914,6 +1008,7 @@ export async function refreshScreeningInfo({
         screeningIndex,
         refreshedProgram,
         info,
+        screenings,
       }
     }
   }
@@ -938,6 +1033,7 @@ export async function refreshScreeningInfo({
     isPremiere,
     isSecondScreening,
     updatedAt: moreInfoUpdatedAt,
+    selectFilmButtonInfo,
   } = moreInfo
 
   if (listAll) {
@@ -952,190 +1048,219 @@ export async function refreshScreeningInfo({
     console.log('Is in Salt Lake City:', isInSaltLakeCity ? 'Yes' : 'No')
     console.log('Time start:', startTime.toLocaleString())
     console.log('Time end:', endTime.toLocaleString())
+    console.log('Is sold out:', selectFilmButtonInfo?.isSoldOut ? 'Yes' : selectFilmButtonInfo?.isSoldOut === undefined ? 'Unknown' : 'No')
+    console.log('Is event:', selectFilmButtonInfo?.isEvent ? 'Yes' : selectFilmButtonInfo?.isEvent === undefined ? 'Unknown' : 'No')
   }
 
-  let storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+  let storedMoreInfo = selectFilmButtonInfo
+    ? (await checkAndNotifySoldOutStatusChanged({
+      screeningId,
+      isSoldOut: selectFilmButtonInfo?.isSoldOut,
+    })).storedMoreInfo
+    : db.getScreeningMoreInfo(screeningId)
+
   let newMoreInfo = {
     ...storedMoreInfo,
     screeningType,
     isPremiere,
     isSecondScreening,
+    ...selectFilmButtonInfo && {
+      isSoldOut: selectFilmButtonInfo.isSoldOut,
+      isEvent: selectFilmButtonInfo.isEvent,
+    },
     updatedAt: moreInfoUpdatedAt,
   }
   db.setScreeningMoreInfo(screeningId, newMoreInfo)
 
   if (skipTba && basicInfo.title.startsWith('TBA ')) {
-    // do nothing
-  } else if (selectFilm) {
-    const selectFilmButton = await screening.findElement(By.xpath('.//button[contains(text(), "Select Film")]'))
-    await selectFilmButton.click()
-    await driver.wait(until.stalenessOf(screening), waitTime(5000))
+    // film is To Be Announced
+    console.log('TBA')
+  } else if (selectFilmToGetInfo || purchaseTicketCount !== undefined) {
+    const selectFilmButtonInfo = await getSelectFilmButton(screening)
+    const selectFilmButton = selectFilmButtonInfo?.button
+    let isTicketSoldOut = selectFilmButtonInfo?.isSoldOut
 
-    const titleLocator = By.xpath(`//div[@class="Eventive--OrderQuantitySelect"]//div[contains(text(), "${title}")]`)
-    const maxAttempts = 20
-    for (let attempt = 0; attempt < maxAttempts; ++attempt) {
-      try {
-        await driver.get(cartUrl)
+    let ticketType: string | undefined
 
-        await driver.wait(until.elementLocated(checkoutButtonLocator), waitTime(7000))
+    // TODO: see how much of this we want to keep in the new 2024 version where we already know if the ticket is sold out from the basic info
+    if (selectFilmButton && isTicketSoldOut === undefined) {
+      await selectFilmButton.click()
+      await driver.wait(until.stalenessOf(screening), waitTime(5000))
 
-        if (purchaseTicketCount !== undefined) {
-          const getCurrentTicketCount = async () => {
-            return +(await driver.findElement(By.css('div.sd_home_pass_count > input')).getAttribute('value'))
-          }
+      const titleLocator = By.xpath(`//div[@class="Eventive--OrderQuantitySelect"]//div[contains(text(), "${title}")]`)
+      const maxAttempts = 20
+      for (let attempt = 0; attempt < maxAttempts; ++attempt) {
+        try {
+          await driver.get(cartUrl)
 
-          let currentTicketCount: number | undefined
-          while (currentTicketCount === undefined || currentTicketCount !== purchaseTicketCount) {
-            currentTicketCount = await getCurrentTicketCount()
-            console.log('currentTicketCount', currentTicketCount)
-            if (currentTicketCount < purchaseTicketCount) {
-              const ticketCount = currentTicketCount
-              await driver.findElement(By.css('button.sd_home_pc_increase')).click()
-              await driver.wait(async () => {
-                currentTicketCount = await getCurrentTicketCount()
-                return currentTicketCount === (ticketCount + 1)
-              }, waitTime(3000))
-            } else if (currentTicketCount > purchaseTicketCount) {
-              throw new Error('Ticket count higher than requested!')
+          await driver.wait(until.elementLocated(checkoutButtonLocator), waitTime(7000))
+
+          if (purchaseTicketCount !== undefined) {
+            const getCurrentTicketCount = async () => {
+              return +(await driver.findElement(By.css('div.sd_home_pass_count > input')).getAttribute('value'))
             }
+
+            let currentTicketCount: number | undefined
+            while (currentTicketCount === undefined || currentTicketCount !== purchaseTicketCount) {
+              currentTicketCount = await getCurrentTicketCount()
+              console.log('currentTicketCount', currentTicketCount)
+              if (currentTicketCount < purchaseTicketCount) {
+                const ticketCount = currentTicketCount
+                await driver.findElement(By.css('button.sd_home_pc_increase')).click()
+                await driver.wait(async () => {
+                  currentTicketCount = await getCurrentTicketCount()
+                  return currentTicketCount === (ticketCount + 1)
+                }, waitTime(3000))
+              } else if (currentTicketCount > purchaseTicketCount) {
+                throw new Error('Ticket count higher than requested!')
+              }
+            }
+            console.log('currentTicketCount', currentTicketCount)
           }
-          console.log('currentTicketCount', currentTicketCount)
+
+          await driver.findElement(checkoutButtonLocator).click()
+
+          await driver.wait(until.elementLocated(titleLocator), waitTime(7000))
+          break
+        } catch (e) {
+          console.error(e)
+          console.log(`attempt ${attempt + 1} of ${maxAttempts} failed`)
+          await driver.get(homeUrl)
         }
+      }
 
-        await driver.findElement(checkoutButtonLocator).click()
+      const titleElement = await driver.findElement(titleLocator)
 
-        await driver.wait(until.elementLocated(titleLocator), waitTime(7000))
-        break
-      } catch (e) {
-        console.error(e)
-        console.log(`attempt ${attempt + 1} of ${maxAttempts} failed`)
-        await driver.get(homeUrl)
+      //const ticketTypeLocator = By.xpath(`${titleLocator}/following-sibling::div[1]`)
+      const ticketTypeLocator = By.xpath(`../div[2]`)
+
+      const ticketTypeElements = await titleElement.findElements(ticketTypeLocator)
+      ticketType = ticketTypeElements.length ? await ticketTypeElements[0].getText() : undefined
+      console.log('ticketType', ticketType)
+
+      if (ticketType) {
+        isTicketSoldOut = ticketType.endsWith('(SOLD OUT)')
       }
     }
 
-    const titleElement = await driver.findElement(titleLocator)
-
-    //const ticketTypeLocator = By.xpath(`${titleLocator}/following-sibling::div[1]`)
-    const ticketTypeLocator = By.xpath(`../div[2]`)
-
-    const ticketTypeElements = await titleElement.findElements(ticketTypeLocator)
-    const ticketType = ticketTypeElements.length ? await ticketTypeElements[0].getText() : undefined
-    console.log('ticketType', ticketType)
-    let isTicketSoldOut: boolean | undefined = (ticketType || '').endsWith('(SOLD OUT)') || undefined
     if (isTicketSoldOut) {
       console.log('SOLD OUT')
     }
 
-    storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-    if (!!storedMoreInfo?.isSoldOut !== !!isTicketSoldOut) {
-      await sendMyselfTweet(
-        `Screening ${isTicketSoldOut ? 'sold out' : 'tickets available'}: ${basicInfo.id}`,
-      )
-    }
+    ({ storedMoreInfo } = await checkAndNotifySoldOutStatusChanged({
+      screeningId,
+      isSoldOut: isTicketSoldOut,
+    }))
+
     newMoreInfo = {
       ...storedMoreInfo || newMoreInfo,
-      ticketType,
+      ...ticketType !== undefined && {
+        ticketType,
+      },
       isSoldOut: isTicketSoldOut,
       updatedAt: new Date(),
     }
     db.setScreeningMoreInfo(screeningId, newMoreInfo)
 
-    let purchased = false
-    if (purchaseTicketCount !== undefined) {
-      const term1Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm1"]')
-      await driver.wait(until.elementLocated(term1Locator), waitTime(3000))
-      await driver.findElement(term1Locator).click()
+    if (selectFilmButton) {
+      // TODO: check if this still works in 2024
+      let purchased = false
+      if (purchaseTicketCount !== undefined) {
+        const term1Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm1"]')
+        await driver.wait(until.elementLocated(term1Locator), waitTime(3000))
+        await driver.findElement(term1Locator).click()
 
-      const term2Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm2"]')
-      await driver.wait(until.elementLocated(term2Locator), waitTime(3000))
-      await driver.findElement(term2Locator).click()
+        const term2Locator = By.xpath('//input[@type="checkbox" and @name="sundanceTerm2"]')
+        await driver.wait(until.elementLocated(term2Locator), waitTime(3000))
+        await driver.findElement(term2Locator).click()
 
-      const buyMiniPrefix = 'Buy ($'
-      const buyPrefix = `${buyMiniPrefix}`
-      const buyPostfix = ')'
-      const buyButtonLocator = By.xpath(`//button//span[contains(text(), "${buyMiniPrefix}")]`)
-      await driver.wait(until.elementLocated(buyButtonLocator), waitTime(3000))
-      const buyButton = await driver.findElement(buyButtonLocator)
-      const buyText = await buyButton.getText()
-      const dollars = +buyText.substring(buyPrefix.length, buyText.length - buyPostfix.length)
-      console.log('total:', `$${dollars}`)
-      if (dollars > purchaseTicketCount * (25 + 2)) {
-        throw new Error(`Unexpected higher price: $${dollars}`)
-      }
-
-      await buyButton.click()
-
-      await new Promise(resolve => setTimeout(resolve, 1000))
-
-      // Check for error message
-      //Sorry, there aren't enough tickets left to fulfill this order ("Landscape With Invisible Hand" Single Film Ticket tickets remaining: 0).
-      const buyErrorLocator = By.xpath(String.raw`//div[contains(text(), "enough tickets left to fulfill this order")]`)
-      let errorNode: WebElement | undefined
-      await driver.wait(async () => {
-        const buyButtons = await driver.findElements(buyButtonLocator)
-        if (!buyButtons.length) {
-          errorNode = undefined
-          return true
+        const buyMiniPrefix = 'Buy ($'
+        const buyPrefix = `${buyMiniPrefix}`
+        const buyPostfix = ')'
+        const buyButtonLocator = By.xpath(`//button//span[contains(text(), "${buyMiniPrefix}")]`)
+        await driver.wait(until.elementLocated(buyButtonLocator), waitTime(3000))
+        const buyButton = await driver.findElement(buyButtonLocator)
+        const buyText = await buyButton.getText()
+        const dollars = +buyText.substring(buyPrefix.length, buyText.length - buyPostfix.length)
+        console.log('total:', `$${dollars}`)
+        if (dollars > purchaseTicketCount * (25 + 2)) {
+          throw new Error(`Unexpected higher price: $${dollars}`)
         }
-        const errorNodes = await driver.findElements(buyErrorLocator)
-        if (errorNodes.length) {
-          errorNode = errorNodes[0]
-          return true
-        }
-      }, waitTime(5000))
 
-      if (errorNode) {
-        const errorMessage = await errorNode.getText()
-        console.error(errorMessage)
-        const ticketsRemainingMatch = errorMessage.match(/ tickets remaining: (\d+)/)
-        console.log('ticketsRemainingMatch', ticketsRemainingMatch)
-        const numberRemainingString = ticketsRemainingMatch?.[1]
-        if (numberRemainingString) {
-          const numberRemaining = +numberRemainingString
-          console.log(`remaining tickets: ${numberRemaining}`)
-          isTicketSoldOut = numberRemaining === 0
-          storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-          if (!!storedMoreInfo?.isSoldOut !== !!isTicketSoldOut) {
-            await sendMyselfTweet(
-              `Screening ${isTicketSoldOut ? 'sold out' : `tickets available (${numberRemaining})`}: ${basicInfo.id}`,
-            )
+        await buyButton.click()
+
+        await new Promise(resolve => setTimeout(resolve, 1000))
+
+        // Check for error message
+        //Sorry, there aren't enough tickets left to fulfill this order ("Landscape With Invisible Hand" Single Film Ticket tickets remaining: 0).
+        const buyErrorLocator = By.xpath(String.raw`//div[contains(text(), "enough tickets left to fulfill this order")]`)
+        let errorNode: WebElement | undefined
+        await driver.wait(async () => {
+          const buyButtons = await driver.findElements(buyButtonLocator)
+          if (!buyButtons.length) {
+            errorNode = undefined
+            return true
           }
+          const errorNodes = await driver.findElements(buyErrorLocator)
+          if (errorNodes.length) {
+            errorNode = errorNodes[0]
+            return true
+          }
+        }, waitTime(5000))
+
+        if (errorNode) {
+          const errorMessage = await errorNode.getText()
+          console.error(errorMessage)
+          const ticketsRemainingMatch = errorMessage.match(/ tickets remaining: (\d+)/)
+          console.log('ticketsRemainingMatch', ticketsRemainingMatch)
+          const numberRemainingString = ticketsRemainingMatch?.[1]
+          if (numberRemainingString) {
+            const numberRemaining = +numberRemainingString
+            console.log(`remaining tickets: ${numberRemaining}`)
+            isTicketSoldOut = numberRemaining === 0
+            storedMoreInfo = db.getScreeningMoreInfo(screeningId)
+            if (!!storedMoreInfo?.isSoldOut !== !!isTicketSoldOut) {
+              await sendNotification(
+                `Screening ${isTicketSoldOut ? 'sold out' : `tickets available (${numberRemaining})`}: ${basicInfo.id}`,
+              )
+            }
+            newMoreInfo = {
+              ...storedMoreInfo || newMoreInfo,
+              isSoldOut: isTicketSoldOut,
+              ticketsRemaining: numberRemaining || undefined,
+              updatedAt: new Date(),
+            }
+            db.setScreeningMoreInfo(screeningId, newMoreInfo)
+          }
+        } else {
+          console.log('purchased successful')
+          purchased = true
+        }
+
+        if (purchased) {
+          storedMoreInfo = db.getScreeningMoreInfo(screeningId)
           newMoreInfo = {
             ...storedMoreInfo || newMoreInfo,
-            isSoldOut: isTicketSoldOut,
-            ticketsRemaining: numberRemaining || undefined,
+            ticketsPurchased: (storedMoreInfo?.ticketsPurchased ?? 0) + purchaseTicketCount,
             updatedAt: new Date(),
           }
           db.setScreeningMoreInfo(screeningId, newMoreInfo)
         }
-      } else {
-        console.log('purchased successful')
-        purchased = true
       }
 
-      if (purchased) {
-        storedMoreInfo = db.getScreeningMoreInfo(screeningId)
-        newMoreInfo = {
-          ...storedMoreInfo || newMoreInfo,
-          ticketsPurchased: (storedMoreInfo?.ticketsPurchased ?? 0) + purchaseTicketCount,
-          updatedAt: new Date(),
-        }
-        db.setScreeningMoreInfo(screeningId, newMoreInfo)
+      if (!purchased) {
+        const cancelButtonLocator = By.xpath('//button//span[text()="Cancel"]')
+        await driver.wait(until.elementLocated(cancelButtonLocator), waitTime(3000))
+        const cancelButton = await driver.findElement(cancelButtonLocator)
+        await cancelButton.click()
+        await driver.wait(until.stalenessOf(cancelButton), waitTime(5000))
+
+        await driver.wait(until.elementLocated(removeItemButtonLocator), waitTime(3000))
+        await driver.findElement(removeItemButtonLocator).click()
+
+        await driver.wait(until.elementLocated(confirmRemoveButtonLocator), waitTime(5000))
+        await driver.findElement(confirmRemoveButtonLocator).click()
       }
-    }
-
-    if (!purchased) {
-      const cancelButtonLocator = By.xpath('//button//span[text()="Cancel"]')
-      await driver.wait(until.elementLocated(cancelButtonLocator), waitTime(3000))
-      const cancelButton = await driver.findElement(cancelButtonLocator)
-      await cancelButton.click()
-      await driver.wait(until.stalenessOf(cancelButton), waitTime(5000))
-
-      await driver.wait(until.elementLocated(removeItemButtonLocator), waitTime(3000))
-      await driver.findElement(removeItemButtonLocator).click()
-
-      await driver.wait(until.elementLocated(confirmRemoveButtonLocator), waitTime(5000))
-      await driver.findElement(confirmRemoveButtonLocator).click()
     }
   }
 
@@ -1145,6 +1270,7 @@ export async function refreshScreeningInfo({
     screeningIndex,
     refreshedProgram,
     info: pruneScreeningInfo(info),
+    screenings,
   }
 }
 

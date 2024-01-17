@@ -1,4 +1,4 @@
-import { WebDriver } from 'selenium-webdriver'
+import { WebDriver, WebElement } from 'selenium-webdriver'
 import express from 'express'
 import cors from 'cors'
 import swaggerUi from 'swagger-ui-express'
@@ -15,12 +15,15 @@ import {
   startOp,
   state,
   assertNotInOp,
+  selectFilmToGetInfo,
 } from './shared/shared'
 import Router from './routes'
 import db from './shared/db'
-import { sendMyselfTweet } from './shared/twitter'
+import { usingGmail, usingTwitter } from './shared/notifications'
 
 console.log('welcome!')
+console.log('Is using Gmail notification:', usingGmail)
+console.log('Is using Twitter notification:', usingTwitter)
 
 async function run() {
   let screeningsSeen = db.scannedScreenings
@@ -32,8 +35,10 @@ async function run() {
   }
   let driver: WebDriver | undefined
   while (true) {
+    let screenings: WebElement[] | undefined
     try {
       if (!state.runningMain || state.inOp) {
+        screenings = undefined
         continue
       }
       driver = await createWebDriver()
@@ -44,7 +49,9 @@ async function run() {
         if (state.inOp > 1) {
           throw new Error('stopping main to allow pending op')
         }
-        await clearCart(driver)
+        if (selectFilmToGetInfo) {
+          await clearCart(driver)
+        }
         if (state.inOp > 1) {
           throw new Error('stopping main to allow pending op')
         }
@@ -57,6 +64,7 @@ async function run() {
           screeningsSeen = new Set()
           db.scannedScreenings = screeningsSeen
           db.currentScreeningId = undefined
+          screenings = undefined
           assertNotInOp()
           try {
             await startOp()
@@ -73,7 +81,10 @@ async function run() {
           try {
             assertNotInOp()
             startOp()
-            result = await refreshScreeningInfo({ driver, screeningId })
+            result = await refreshScreeningInfo({ driver, screeningId, screenings })
+            if (!selectFilmToGetInfo) {
+              screenings = result.screenings
+            }
           } finally {
             endOp()
           }
@@ -87,6 +98,7 @@ async function run() {
     } catch (error) {
       console.error(error)
     } finally {
+      screenings = undefined
       if (driver) {
         driver.close()
         driver = undefined
@@ -110,7 +122,7 @@ function customReplacer(this: any, key: string, value: any): any {
 }
 
 app.use(
-  '/api-docs',
+  '/swagger-ui',
   swaggerUi.serve,
   swaggerUi.setup(undefined, {
     swaggerOptions: {
