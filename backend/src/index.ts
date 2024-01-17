@@ -45,7 +45,9 @@ async function run() {
       assertNotInOp()
       try {
         await startOp()
-        await signIn(driver)
+        if (selectFilmToGetInfo) {
+          await signIn(driver)
+        }
         if (state.inOp > 1) {
           throw new Error('stopping main to allow pending op')
         }

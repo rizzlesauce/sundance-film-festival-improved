@@ -59,15 +59,8 @@ export function endOp() {
   }
 }
 
-export const email = process.env['SUNDANCE_EMAIL'] || ''
-if (!email) {
-  throw new Error('missing SUNDANCE_EMAIL')
-}
-
-export const password = process.env['SUNDANCE_PASSWORD'] || ''
-if (!password) {
-  throw new Error('missing SUNDANCE_PASSWORD')
-}
+export const email = process.env['SUNDANCE_EMAIL']
+export const password = process.env['SUNDANCE_PASSWORD']
 
 export const port = +(process.env.PORT || 3000)
 
@@ -508,9 +501,6 @@ export async function refreshFilms(driver: WebDriver) {
       const tagLine = await card.findElement(By.css('.sd_event_card_desc_content')).getAttribute('innerHTML')
       console.log(`${cardIndex + 1}) ${title}`)
 
-      // TODO: remove
-      await new Promise(resolve => setTimeout(resolve, 3000))
-
       await card.click()
 
       await driver.wait(async () => (await driver.getCurrentUrl()) !== filmsUrlResolved)
@@ -794,7 +784,7 @@ export async function refreshFilmInfoFromTitleSearch(driver: WebDriver, titleSea
   const filmEntry = await driver.findElement(filmEntryLocator)
 
   // TODO: remove
-  await new Promise(resolve => setTimeout(resolve, 1000))
+  await new Promise(resolve => setTimeout(resolve, 300))
 
   await filmEntry.findElement(By.css(':scope > td')).click()
 
@@ -866,6 +856,13 @@ export async function createWebDriver() {
 }
 
 export async function signIn(driver: WebDriver) {
+  if (!email) {
+    throw new Error('missing SUNDANCE_EMAIL')
+  }
+  if (!password) {
+    throw new Error('missing SUNDANCE_PASSWORD')
+  }
+
   await driver.get(signinUrl)
 
   const emailInputLocator = By.css('input[name="email"]')

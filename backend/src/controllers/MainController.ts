@@ -36,6 +36,7 @@ import {
   refreshShortsInfoFromId,
   getFilmInfoStoredComplete,
   pruneScreeningInfo,
+  selectFilmToGetInfo,
 } from '../shared/shared'
 import db from '../shared/db'
 import { Readable } from 'stream'
@@ -189,7 +190,9 @@ export default class MainController {
     const driver = await createWebDriver()
     try {
       await startOp()
-      await signIn(driver)
+      if (selectFilmToGetInfo) {
+        await signIn(driver)
+      }
       await refreshProgram(driver)
     } finally {
       endOp()
@@ -366,8 +369,10 @@ export default class MainController {
     const driver = await createWebDriver()
     try {
       await startOp()
-      await signIn(driver)
-      await clearCart(driver)
+      if (selectFilmToGetInfo) {
+        await signIn(driver)
+        await clearCart(driver)
+      }
       const data = await refreshScreeningInfo({ driver, screeningId })
       return data
     } finally {
