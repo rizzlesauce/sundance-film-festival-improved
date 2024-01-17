@@ -386,7 +386,7 @@ export const confirmRemoveButtonLocator = By.xpath('//button[contains(@class, "s
 
 export async function scrapeFilmCategoryEventCard(eventCard: WebElement): Promise<FilmCategory> {
   await scrollElementIntoView(eventCard)
-  const title = await eventCard.findElement(By.css('.sd_event_card_desc > h2')).getText()
+  const title = await eventCard.findElement(By.css('.sd_event_card_desc > span')).getText()
   const description = await eventCard.findElement(By.css('.sd_event_card_desc_content')).getText()
   return {
     title,
