@@ -745,17 +745,17 @@ export async function refreshFilmInfoFromTitleSearch(driver: WebDriver, titleSea
 
   await waitForLoadingDone({ driver })
 
-  const searchButtonLocator = By.css('.sd_menu_search button')
+  const searchButtonLocator = By.css('.sd_filter_search button')
   await driver.wait(until.elementLocated(searchButtonLocator), waitTime(3000))
   const searchButton = await driver.findElement(searchButtonLocator)
   await driver.wait(until.elementIsVisible(searchButton), waitTime(5000))
   await searchButton.click()
 
-  const searchInputLocator = By.css('.sd_popup_search_input input')
+  const searchInputLocator = By.css('.sd_popup_search_input > input')
   await driver.wait(until.elementLocated(searchInputLocator), waitTime(3000))
   await driver.findElement(searchInputLocator).sendKeys(titleSearch)
 
-  const filmEntryLocator = By.css('.sd_popup_table table tbody tr')
+  const filmEntryLocator = By.css('.sd_popup_table table > tbody > tr')
   await driver.wait(until.elementLocated(filmEntryLocator), waitTime(7000))
   const filmEntry = await driver.findElement(filmEntryLocator)
   await filmEntry.findElement(By.css(':scope > td')).click()
