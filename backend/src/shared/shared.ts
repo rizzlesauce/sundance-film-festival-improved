@@ -75,7 +75,10 @@ export const baseUrl = 'https://festival.sundance.org'
 export const homeUrl = `${baseUrl}/`
 export const signinUrl = `${baseUrl}/sign-in`
 export const programUrl = `${baseUrl}/program`
+export const categoriesUrl = `${programUrl}/categores`
+export const categoriesUrlResolved = `${categoriesUrl}/`
 export const filmsUrl = `${programUrl}/films`
+export const filmsUrlResolved = `${filmsUrl}/`
 export const filmUrl = (filmId: string) => `${programUrl}/film/${filmId}`
 export const shortsInfoUrl = (shortId: string) => `${programUrl}/short-info/${shortId}`
 export const ticketsUrl = `${baseUrl}/tickets`
@@ -396,7 +399,7 @@ export async function scrapeFilmCategoryEventCard(eventCard: WebElement): Promis
 }
 
 export async function refreshCategories(driver: WebDriver) {
-  await driver.get(programUrl)
+  await driver.get(categoriesUrl)
 
   const eventCardLocator = By.css('.sd_event_card')
   await driver.wait(until.elementLocated(eventCardLocator), waitTime(7000))
@@ -426,7 +429,7 @@ export async function refreshCategories(driver: WebDriver) {
 export async function waitForLoadingDone({
   driver,
   waitFind = 5000,
-  waitStale = 7000,
+  waitStale = 30000,
 }: {
   driver: WebDriver,
   waitFind?: number
@@ -449,14 +452,20 @@ export async function refreshFilms(driver: WebDriver) {
   await driver.get(filmsUrl)
 
   const films = new Map<string, FilmTitleAndId>()
+  let currentPage = -1
   let lastPage = 0
-  let lastPageFirstEventId = ''
   const seenEventIds = new Set<string>()
 
-  await waitForLoadingDone({ driver })
+  const waitForPageChange = async () => {
+    await driver.wait(async () => {
+      currentPage = +(await driver.findElement(By.css('.pagination .active a')).getText())
+      return currentPage === lastPage + 1
+    }, waitTime(5000), 'page number incremented')
+    lastPage = currentPage
+    console.log('lastPage', lastPage)
+  }
 
-  while (true) {
-    let newCardsNotYetLoadedCount = -1
+  const getPageLoadedCards = async () => {
     let lastEventCardsLength = 0
     let lastEventCardFoundTime = Number.MAX_VALUE
     let eventCards: WebElement[] = []
@@ -474,15 +483,13 @@ export async function refreshFilms(driver: WebDriver) {
         }
       }
     }, waitTime(7000), 'event cards loaded')
+    return eventCards
+  }
 
-    console.log('lastPage', lastPage)
-
-    let currentPage = -1
-    await driver.wait(async () => {
-      currentPage = +(await driver.findElement(By.css('.pagination .active a')).getText())
-      return currentPage === lastPage + 1
-    }, waitTime(5000), 'page number incremented')
-    lastPage = currentPage
+  while (true) {
+    await waitForLoadingDone({ driver })
+    await waitForPageChange()
+    let eventCards = await getPageLoadedCards()
 
     const paginationButtons = await driver.findElements(By.css('.pagination a'))
     const totalPages = +(await paginationButtons[paginationButtons.length - 2]?.getText())
@@ -496,66 +503,73 @@ export async function refreshFilms(driver: WebDriver) {
 
     for (let cardIndex = 0; cardIndex < eventCards.length; ++cardIndex) {
       const card = eventCards[cardIndex]
-      await scrollElementIntoView(card)
-      const title = await card.findElement(By.css('.sd_event_card_desc h2')).getText()
-      const url = await card.getAttribute('href')
-      let eventId
-      let eventType: 'film' | 'shorts'
-      try {
-        eventId = getFilmIdFromUrl(url)
-        eventType = 'film'
-      } catch (e) {
-        eventId = getShortsIdFromUrl(url)
-        eventType = 'shorts'
-      }
-      if (cardIndex === 0) {
-        if (eventId === lastPageFirstEventId) {
-          if (newCardsNotYetLoadedCount < 0) {
-            newCardsNotYetLoadedCount = 5
-          } else {
-            newCardsNotYetLoadedCount -= 1
-          }
-          break
-        } else {
-          lastPageFirstEventId = eventId
-        }
-      }
-      console.log(`${cardIndex + 1}) ${title} ${eventType} ${eventId}`)
-      if (seenEventIds.has(eventId)) {
-        console.warn(`skipping duplicate event id (already seen ${eventId} this round)`)
-        continue
-      }
+      await scrollElementIntoView(card, `card ${cardIndex}`)
+      const title = await card.findElement(By.css('.sd_event_title > h2')).getText()
       const tagLine = await card.findElement(By.css('.sd_event_card_desc_content')).getAttribute('innerHTML')
-      const titleAndId = {
-        title,
-        id: eventId,
-        isShorts: eventType === 'shorts' || undefined,
-        updatedAt: new Date(),
-      }
-      films.set(eventId, titleAndId)
-      db.setFilmBasicInfo(eventId, {
-        ...titleAndId,
-        url,
-        tagLine,
-      })
-      const { allFilms } = db
-      allFilms.set(eventId, titleAndId)
-      db.allFilms = allFilms
-    }
+      console.log(`${cardIndex + 1}) ${title}`)
 
-    if (newCardsNotYetLoadedCount >= 0) {
-      console.warn(`new cards not yet loaded; tries remaining: ${newCardsNotYetLoadedCount}`)
-      if (newCardsNotYetLoadedCount === 0) {
-        throw new Error('failed to get next page event cards')
+      // TODO: remove
+      await new Promise(resolve => setTimeout(resolve, 3000))
+
+      await card.click()
+
+      await driver.wait(async () => (await driver.getCurrentUrl()) !== filmsUrlResolved)
+
+      const filmUrl = await driver.getCurrentUrl()
+      const {
+        eventType,
+        eventId,
+      } = getEventIdFromUrl(filmUrl)
+
+      console.log(`${cardIndex + 1}) Loading ${title}: ${eventId} (${eventType})`)
+
+      try {
+        const filmInfo = await refreshEventInfoFromCurrentPage(driver)
+
+        const {
+          url,
+          eventType,
+        } = filmInfo
+        const eventId = filmInfo.id
+
+        if (seenEventIds.has(eventId)) {
+          // TODO: still need this?
+          console.warn(`skipping duplicate event id (already seen ${eventId} this round)`)
+        } else {
+          if (false) {
+            console.log(`${cardIndex + 1}) ${title} ${eventType} ${eventId}`)
+          }
+
+          const titleAndId = {
+            title,
+            id: eventId,
+            isShorts: eventType === 'shorts' || undefined,
+            updatedAt: new Date(),
+          }
+          films.set(eventId, titleAndId)
+          db.setFilmBasicInfo(eventId, {
+            ...titleAndId,
+            url,
+            tagLine,
+          })
+          const { allFilms } = db
+          allFilms.set(eventId, titleAndId)
+          db.allFilms = allFilms
+        }
+      } catch (e) {
+        console.error(e)
+      } finally {
+        await driver.navigate().back()
+        await driver.wait(until.urlIs(`${filmsUrl}/`), waitTime(10000))
+        await waitForLoadingDone({ driver })
+        eventCards = await getPageLoadedCards()
       }
-      continue
     }
 
     if (isLastPage) {
       break
     }
 
-    //await scrollElementIntoView(nextButton)
     await nextButtonContainer.click()
   }
 
@@ -573,6 +587,8 @@ export async function refreshSpecifiedEventInfoFromCurrentPage(
     until.urlMatches(isShorts ? shortsInfoUrlRegex : filmUrlRegex),
     waitTime(7000)
   )
+
+  await waitForLoadingDone({ driver })
 
   const url = await driver.getCurrentUrl()
   const eventId = isShorts ? getShortsIdFromUrl(url) : getFilmIdFromUrl(url)
@@ -636,34 +652,44 @@ export async function refreshSpecifiedEventInfoFromCurrentPage(
     let lastTotalShorts = -1
     const idsSeen = new Set<string>()
     const shortLinkLocator = By.css('.sd_film_description .sd_film_desc_timings > div.short_links > a')
-    for (; totalShorts < 0 || shortsIndex < totalShorts; ++shortsIndex) {
+    let hasShortLinks = true
+    try {
       await driver.wait(until.elementLocated(shortLinkLocator), waitTime(7000))
-      const shortLinks = await driver.findElements(shortLinkLocator)
-      totalShorts = shortLinks.length
-      if (lastTotalShorts < 0) {
-        lastTotalShorts = totalShorts
-      }
-      if (totalShorts < lastTotalShorts) {
-        shortsIndex -= 1
-        continue
-      }
-      console.log('shorts: ', shortLinks.length)
-      if (shortsIndex < totalShorts) {
-        const shortLink = shortLinks[shortsIndex]
-        //await scrollElementIntoView(shortLink, 'short link')
-        await driver.wait(until.elementIsVisible(shortLink), waitTime(3000), 'short link')
+    } catch (e) {
+      console.warn('No short links listed')
+      hasShortLinks = false
+    }
 
-        const shortTitle = await shortLink.getText()
-        console.log(`${shortsIndex + 1}) (short) ${shortTitle}`)
-
-        await shortLink.click()
-        const info = await refreshSpecifiedEventInfoFromCurrentPage(driver, false, eventId)
-        if (!idsSeen.has(info.id)) {
-          filmInfos.push(info)
-          idsSeen.add(info.id)
+    if (hasShortLinks) {
+      for (; totalShorts < 0 || shortsIndex < totalShorts; ++shortsIndex) {
+        await driver.wait(until.elementLocated(shortLinkLocator), waitTime(7000))
+        const shortLinks = await driver.findElements(shortLinkLocator)
+        totalShorts = shortLinks.length
+        if (lastTotalShorts < 0) {
+          lastTotalShorts = totalShorts
         }
-        if (shortsIndex < totalShorts - 1) {
-          await driver.get(url)
+        if (totalShorts < lastTotalShorts) {
+          shortsIndex -= 1
+          continue
+        }
+        console.log('shorts: ', shortLinks.length)
+        if (shortsIndex < totalShorts) {
+          const shortLink = shortLinks[shortsIndex]
+          await driver.wait(until.elementIsVisible(shortLink), waitTime(3000), 'short link')
+
+          const shortTitle = await shortLink.getText()
+          console.log(`${shortsIndex + 1}) (short) ${shortTitle}`)
+
+          await scrollElementIntoView(shortLink, `short ${shortsIndex + 1}: ${shortTitle}`)
+          await shortLink.click()
+          const info = await refreshSpecifiedEventInfoFromCurrentPage(driver, false, eventId)
+          if (!idsSeen.has(info.id)) {
+            filmInfos.push(info)
+            idsSeen.add(info.id)
+          }
+          await driver.navigate().back()
+          await driver.wait(until.urlIs(url), waitTime(10000))
+          // TODO: wait in a better way
           await new Promise(resolve => setTimeout(resolve, 1000))
         }
       }
@@ -732,9 +758,17 @@ export async function refreshEventInfoFromCurrentPage(driver: WebDriver) {
   } = getEventIdFromUrl(url)
 
   if (eventType === 'film') {
-    return await refreshFilmInfoFromId(driver, eventId)
+    return {
+      ...await refreshFilmInfoFromId(driver, eventId),
+      eventType,
+      url,
+    }
   } else if (eventType === 'shorts') {
-    return await refreshShortsInfoFromId(driver, eventId)
+    return {
+      ...await refreshShortsInfoFromId(driver, eventId),
+      eventType,
+      url,
+    }
   } else {
     throw new Error(`unsupported event type: ${eventType}`)
   }
@@ -758,7 +792,20 @@ export async function refreshFilmInfoFromTitleSearch(driver: WebDriver, titleSea
   const filmEntryLocator = By.css('.sd_popup_table table > tbody > tr')
   await driver.wait(until.elementLocated(filmEntryLocator), waitTime(7000))
   const filmEntry = await driver.findElement(filmEntryLocator)
+
+  // TODO: remove
+  await new Promise(resolve => setTimeout(resolve, 1000))
+
   await filmEntry.findElement(By.css(':scope > td')).click()
+
+  await driver.wait(async () => (await driver.getCurrentUrl()) !== filmsUrlResolved)
+  const filmUrl = await driver.getCurrentUrl()
+  const {
+    eventType,
+    eventId,
+  } = getEventIdFromUrl(filmUrl)
+
+  console.log(`Loading ${eventType} (${eventId})`)
 
   return await refreshEventInfoFromCurrentPage(driver)
 }
@@ -1189,6 +1236,7 @@ export async function refreshScreeningInfo({
 
         await buyButton.click()
 
+        // TODO: wait in a better way
         await new Promise(resolve => setTimeout(resolve, 1000))
 
         // Check for error message
